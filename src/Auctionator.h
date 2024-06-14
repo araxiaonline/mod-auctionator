@@ -47,7 +47,7 @@ class Auctionator : public AuctionatorBase
 
     public:
         ~Auctionator();
-        void CreateAuction(AuctionatorItem newItem, uint32 houseId);
+        void CreateAuction(AuctionatorItem newItem);
         void ExpireAllAuctions(uint32 houseId);
         AuctionHouseEntry const *GetAuctionHouseEntry(uint32 houseId);
         AuctionHouseObject *GetAuctionHouse(uint32 houseId);

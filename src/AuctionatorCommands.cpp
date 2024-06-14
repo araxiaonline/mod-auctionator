@@ -93,7 +93,7 @@ class AuctionatorCommands : public CommandScript
             newItem.itemId = itemId;
             newItem.buyout = price;
 
-            auctionator->CreateAuction(newItem, AUCTIONHOUSE_NEUTRAL);
+            auctionator->CreateAuction(newItem);
         }
 
         static void ShowHelp(ChatHandler* handler)

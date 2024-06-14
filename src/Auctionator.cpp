@@ -38,7 +38,7 @@ Auctionator::Auctionator()
 Auctionator::~Auctionator()
 {}
 
-void Auctionator::CreateAuction(AuctionatorItem newItem, uint32 houseId)
+void Auctionator::CreateAuction(AuctionatorItem newItem)
 {
     // will need this when we want to know details of the item for filtering
     // ItemTemplate const* prototype = sObjectMgr->GetItemTemplate(itemId);
@@ -47,6 +47,7 @@ void Auctionator::CreateAuction(AuctionatorItem newItem, uint32 houseId)
     Player player(session);
     player.Initialize(config->characterGuid);
     ObjectAccessor::AddObject(&player);
+    uint32 houseId = newItem.houseId;
 
     logDebug("Creating Auction for item: " + std::to_string(newItem.itemId));
     // Create the item (and add it to the update queue for the player ")

@@ -175,6 +175,7 @@ void AuctionatorSeller::LetsGetToIt(uint32 maxCount, uint32 houseId)
         AuctionatorItem newItem = AuctionatorItem();
         newItem.itemId = fields[0].Get<uint32>();
         newItem.quantity = 1;
+        newItem.houseId = houseId;
         newItem.buyout = uint32(price * stackSize * qualityMultiplier);
         newItem.bid = uint32(bidPrice * stackSize * qualityMultiplier);
         newItem.time = 60 * 60 * 12;
@@ -187,7 +188,7 @@ void AuctionatorSeller::LetsGetToIt(uint32 maxCount, uint32 houseId)
         );
 
 
-        nator->CreateAuction(newItem, houseId);
+        nator->CreateAuction(newItem);
         if (count == maxCount) {
             break;
         }
