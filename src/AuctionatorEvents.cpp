@@ -6,8 +6,6 @@
 #include <functional>
 #include <chrono>
 
-using Minutes = std::chrono::minutes;
-
 AuctionatorEvents::AuctionatorEvents(AuctionatorConfig* auctionatorConfig)
 {
     SetLogPrefix("[AuctionatorEvents] ");
@@ -47,27 +45,27 @@ void AuctionatorEvents::InitializeEvents()
 
     // AllianceBidder
     if (config->allianceBidder.enabled) {
-        events.ScheduleEvent(1, Minutes(config->allianceBidder.cycleMinutes));
+        events.ScheduleEvent(1, std::chrono::minutes(config->allianceBidder.cycleMinutes));
     }
     // HordeBidder
     if (config->hordeBidder.enabled) {
-        events.ScheduleEvent(2, Minutes(config->hordeBidder.cycleMinutes));
+        events.ScheduleEvent(2, std::chrono::minutes(config->hordeBidder.cycleMinutes));
     }
     // NeutralBidder
     if (config->neutralBidder.enabled) {
-        events.ScheduleEvent(3, Minutes(config->neutralBidder.cycleMinutes));
+        events.ScheduleEvent(3, std::chrono::minutes(config->neutralBidder.cycleMinutes));
     }
 
     if (config->allianceSeller.enabled) {
-        events.ScheduleEvent(4, Minutes(1));
+        events.ScheduleEvent(4, std::chrono::minutes(1));
     }
 
     if (config->hordeSeller.enabled) {
-        events.ScheduleEvent(5, Minutes(1));
+        events.ScheduleEvent(5, std::chrono::minutes(1));
     }
 
     if (config->neutralSeller.enabled) {
-        events.ScheduleEvent(6, Minutes(1));
+        events.ScheduleEvent(6, std::chrono::minutes(1));
     }
 }
 
@@ -88,37 +86,37 @@ void AuctionatorEvents::ExecuteEvents()
                     case 1:
                         EventAllianceBidder();
                         if (config->allianceBidder.enabled) {
-                            events.ScheduleEvent(currentEvent, Minutes(config->allianceBidder.cycleMinutes));
+                            events.ScheduleEvent(currentEvent, std::chrono::minutes(config->allianceBidder.cycleMinutes));
                         }
                         break;
                     case 2:
                         EventHordeBidder();
                         if (config->hordeBidder.enabled) {
-                            events.ScheduleEvent(currentEvent, Minutes(config->hordeBidder.cycleMinutes));
+                            events.ScheduleEvent(currentEvent, std::chrono::minutes(config->hordeBidder.cycleMinutes));
                         }
                         break;
                     case 3:
                         EventNeutralBidder();
                         if (config->neutralBidder.enabled) {
-                            events.ScheduleEvent(currentEvent, Minutes(config->neutralBidder.cycleMinutes));
+                            events.ScheduleEvent(currentEvent, std::chrono::minutes(config->neutralBidder.cycleMinutes));
                         }
                         break;
                     case 4:
                         EventAllianceSeller();
                         if (config->allianceSeller.enabled) {
-                            events.ScheduleEvent(currentEvent, Minutes(1));
+                            events.ScheduleEvent(currentEvent, std::chrono::minutes(1));
                         }
                         break;
                     case 5:
                         EventHordeSeller();
                         if (config->hordeSeller.enabled) {
-                            events.ScheduleEvent(currentEvent, Minutes(1));
+                            events.ScheduleEvent(currentEvent, std::chrono::minutes(1));
                         }
                         break;
                     case 6:
                         EventNeutralSeller();
                         if (config->neutralSeller.enabled) {
-                            events.ScheduleEvent(currentEvent, Minutes(1));
+                            events.ScheduleEvent(currentEvent, std::chrono::minutes(1));
                         }
                         break;
                 }
