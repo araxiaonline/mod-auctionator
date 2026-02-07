@@ -347,7 +347,7 @@ void Auctionator::Update()
 */
 
     logInfo("UpdatingEvents");
-    events.Update(1);
+    events.Update(60000);
 
     logInfo("^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^ ^");
 }
