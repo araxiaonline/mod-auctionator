@@ -24,149 +24,113 @@ AuctionatorSeller::~AuctionatorSeller()
 
 void AuctionatorSeller::LetsGetToIt(uint32 maxCount, uint32 houseId)
 {
-
-    // Set the maximum number of items to query for. Changing this <might>
-    // affect how random our auctoin listing are at the cost of memory/cpu
-    // but it is something i need to test.
-    uint32 queryLimit = nator->config->sellerConfig.queryLimit;
-
-    // Get the name of the character database so we can do our join below.
     std::string characterDbName = CharacterDatabase.GetConnectionInfo()->database;
+    static std::vector<CachedItem> cachedItems = []() {
+        std::vector<CachedItem> items;
 
-    // soooo, let's talk query.
-    // I like doing this with a query because it's easy to me but this isn't
-    // really how acore works AND this makes this module completely incompatible
-    // with Trinitycore and other cores that don't have a template table and instead
-    // rely on the DBC files. I really should use the memory store of templates
-    // for this but it would mean a TON of extra knarly c++ code that i just don't
-    // want to write. If you want to run this on trinity or want to write that nasty
-    // c++ in a trinity specific iffy block thing and submit a PR i would be happy
-    // to consider it, but left on my own I am going to stick with this sql query.
-    std::string itemQuery = R"(
-        SELECT
-            it.entry
-            , it.name
-            , it.BuyPrice
-            , it.stackable
-            , it.quality
-            , mp.average_price
-        FROM
-            mod_auctionator_itemclass_config aicconf
-            LEFT JOIN item_template it ON
-                aicconf.class = it.class
-                AND aicconf.subclass = it.subclass
-                -- skip BoP
-                AND it.bonding != 1
-                AND (
-                    it.bonding >= aicconf.bonding
-                    OR it.bonding = 0
-                )
-            LEFT JOIN mod_auctionator_disabled_items dis on it.entry = dis.item
-            LEFT JOIN (
-                -- this sub query lets us get the current count of each item already in the AH
-                -- so that we can filter out any items where itemCount >= max_count and not add
-                -- anymore of them.
-                SELECT
-                    count(ii.itemEntry) as itemCount
-                    , ii.itemEntry AS itemEntry
-                FROM
-                    {}.item_instance ii
-                    INNER JOIN {}.auctionhouse ah ON ii.guid = ah.itemguid
-                    LEFT JOIN item_template it ON ii.itemEntry = it.entry
-                WHERE ah.houseId = {}
-                GROUP BY ii.itemEntry, it.name
-            ) ic ON ic.itemEntry = it.entry
-            LEFT JOIN
-                -- get the newest prices for our items that we have in our
-                -- market price table.
-                (
-                    SELECT
-                        DISTINCT(mpp.entry),
-                        mpa.average_price
-                    FROM {}.mod_auctionator_market_price mpp
+        std::string cacheQuery = R"(
+            SELECT
+                it.entry, it.name, it.BuyPrice, it.stackable, it.quality
+                , COALESCE(mp.average_price, 0) as average_price, aicconf.max_count
+            FROM
+                mod_auctionator_itemclass_config aicconf
+                INNER JOIN item_template it ON
+                    aicconf.class = it.class
+                    AND aicconf.subclass = it.subclass
+                    AND it.bonding != 1
+                    AND (it.bonding >= aicconf.bonding OR it.bonding = 0)
+                    AND it.VerifiedBuild != 1
+                LEFT JOIN mod_auctionator_disabled_items dis ON it.entry = dis.item
+                LEFT JOIN (
+                    SELECT mp1.entry, mp1.average_price
+                    FROM {}.mod_auctionator_market_price mp1
                     INNER JOIN (
-                        SELECT
-                            max(scan_datetime) AS scan,
-                            entry
+                        SELECT entry, MAX(scan_datetime) as max_scan
                         FROM {}.mod_auctionator_market_price
                         GROUP BY entry
-                    ) mps ON mpp.entry = mps.entry
-                    INNER JOIN
-                        {}.mod_auctionator_market_price mpa
-                        ON mpa.entry = mpp.entry
-                        AND mpa.scan_datetime = mps.scan
+                    ) mp2 ON mp1.entry = mp2.entry AND mp1.scan_datetime = mp2.max_scan
                 ) mp ON it.entry = mp.entry
-        WHERE
-            -- filter out items from the disabled table
-            dis.item IS NULL
-            -- filter out items with 'depreacted' anywhere in the name
-            -- AND it.name NOT LIKE '%deprecated%'
-            -- filter out items that start with 'Test'
-            -- AND it.name NOT LIKE 'Test%'
-            -- AND it.name NOT LIKE 'NPC %'
-            -- filter out items where we are already at or above max_count
-            -- for uniques in this class to limit dups
-            AND (ic.itemCount IS NULL OR ic.itemCount < aicconf.max_count)
-            AND VerifiedBuild != 1
-        ORDER BY RAND()
-        LIMIT {}
-        ;
+            WHERE dis.item IS NULL
+        )";
+
+        QueryResult result = WorldDatabase.Query(cacheQuery, characterDbName, characterDbName);
+
+        if (result)
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+                CachedItem item;
+                item.entry = fields[0].Get<uint32>();
+                item.name = fields[1].Get<std::string>();
+                item.basePrice = fields[2].Get<uint32>();
+                item.stackable = fields[3].Get<uint32>();
+                item.quality = fields[4].Get<uint32>();
+                item.marketPrice = fields[5].Get<uint32>();
+                item.maxCount = fields[6].Get<uint32>();
+                items.push_back(item);
+            } while (result->NextRow());
+        }
+
+        return items;
+    }();
+
+
+    std::string countQuery = R"(
+        SELECT ii.itemEntry, COUNT(*) as itemCount
+        FROM {}.item_instance ii
+        INNER JOIN {}.auctionhouse ah ON ii.guid = ah.itemguid
+        WHERE ah.houseId = {}
+        GROUP BY ii.itemEntry
     )";
 
-    QueryResult result = WorldDatabase.Query(
-        itemQuery,
-        characterDbName,
-        characterDbName,
-        houseId,
-        characterDbName,
-        characterDbName,
-        characterDbName,
-        queryLimit
-    );
+    QueryResult countResult = CharacterDatabase.Query(countQuery, characterDbName, characterDbName, houseId);
 
-    if (!result)
+    std::unordered_map<uint32, uint32> currentCounts;
+    if (countResult)
     {
-        logDebug("No results for LetsGo item query");
-        return;
+        do
+        {
+            Field* fields = countResult->Fetch();
+            currentCounts[fields[0].Get<uint32>()] = fields[1].Get<uint32>();
+        } while (countResult->NextRow());
     }
 
-    AuctionatorPriceMultiplierConfig multiplierConfig = nator->config->sellerMultipliers;
+    std::vector<CachedItem> shuffled = cachedItems;
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::shuffle(shuffled.begin(), shuffled.end(), gen);
+
     uint32 count = 0;
-    do
+    for (const auto& item : shuffled)
     {
-        count++;
-        Field* fields = result->Fetch();
+        uint32 currentCount = currentCounts[item.entry];
+        if (currentCount >= item.maxCount) continue;
 
-        // TODO: refactor listing an item into a testable method
-        std::string itemName = fields[1].Get<std::string>();
+        std::string itemName = item.name;
 
-        uint32 stackSize = fields[3].Get<uint32>();
+        uint32 stackSize = item.stackable;
         if (stackSize > 20) {
             stackSize = 20;
         }
 
-        // create a random number between 1 and stackSize
         if (stackSize > 1 && nator->config->sellerConfig.randomizeStackSize) {
             stackSize = GetRandomNumber(1, stackSize);
             logDebug("Stack size: " + std::to_string(stackSize));
         }
 
-        uint32 quality = fields[4].Get<uint32>();
-        float qualityMultiplier = Auctionator::GetQualityMultiplier(multiplierConfig, quality);
+        float qualityMultiplier = Auctionator::GetQualityMultiplier(nator->config->sellerMultipliers, item.quality);
 
-        uint32 price = fields[2].Get<uint32>();
-        uint32 marketPrice = fields[5].Get<uint32>();
-        if (marketPrice > 0) {
+        uint32 price = item.marketPrice > 0 ? item.marketPrice : item.basePrice;
+        if (item.marketPrice > 0) {
             logDebug("Using Market over Template [" + itemName + "] " +
-                std::to_string(marketPrice) + " <--> " + std::to_string(price));
-            price = marketPrice;
+                std::to_string(item.marketPrice) + " <--> " + std::to_string(item.basePrice));
         }
 
         if (price == 0) {
             price = 10000000 * qualityMultiplier;
         }
 
-        // calculate our starting bid price
         uint32 bidPrice = price;
         float bidStartModifier = nator->config->sellerConfig.bidStartModifier;
         logDebug("Bid start modifier: " + std::to_string(bidStartModifier));
@@ -174,7 +138,7 @@ void AuctionatorSeller::LetsGetToIt(uint32 maxCount, uint32 houseId)
         logDebug("Bid price " + std::to_string(bidPrice) + " from price " + std::to_string(price));
 
         AuctionatorItem newItem = AuctionatorItem();
-        newItem.itemId = fields[0].Get<uint32>();
+        newItem.itemId = item.entry;
         newItem.quantity = 1;
         newItem.houseId = houseId;
         newItem.buyout = uint32(price * stackSize * qualityMultiplier);
@@ -188,12 +152,13 @@ void AuctionatorSeller::LetsGetToIt(uint32 maxCount, uint32 houseId)
             + " to house " + std::to_string(houseId)
         );
 
-
         nator->CreateAuction(newItem);
+
+        count++;
         if (count == maxCount) {
             break;
         }
-    } while (result->NextRow());
+    }
 
     logInfo("Items added houseId("
         + std::to_string(houseId)

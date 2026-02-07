@@ -5,6 +5,16 @@
 #include "Auctionator.h"
 #include "AuctionHouseMgr.h"
 
+struct CachedItem {
+    uint32 entry;
+    std::string name;
+    uint32 basePrice;
+    uint32 stackable;
+    uint32 quality;
+    uint32 marketPrice;
+    uint32 maxCount;
+};
+
 class AuctionatorSeller : public AuctionatorBase
 {
     private:
