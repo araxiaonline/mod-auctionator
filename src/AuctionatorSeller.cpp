@@ -3,9 +3,8 @@
 #include "AuctionatorSeller.h"
 #include "Item.h"
 #include "DatabaseEnv.h"
-#include "PreparedStatement.h"
-#include <random>
 #include "QueryResult.h"
+#include <random>
 
 
 AuctionatorSeller::AuctionatorSeller(Auctionator* natorParam, uint32 auctionHouseIdParam)
@@ -24,8 +23,8 @@ AuctionatorSeller::~AuctionatorSeller()
 
 void AuctionatorSeller::LetsGetToIt(uint32 maxCount, uint32 houseId)
 {
-    std::string characterDbName = CharacterDatabase.GetConnectionInfo()->database;
     static std::vector<CachedItem> cachedItems = []() {
+        std::string characterDbName = CharacterDatabase.GetConnectionInfo()->database;
         std::vector<CachedItem> items;
 
         std::string cacheQuery = R"(
@@ -76,24 +75,17 @@ void AuctionatorSeller::LetsGetToIt(uint32 maxCount, uint32 houseId)
     }();
 
 
-    std::string countQuery = R"(
-        SELECT ii.itemEntry, COUNT(*) as itemCount
-        FROM {}.item_instance ii
-        INNER JOIN {}.auctionhouse ah ON ii.guid = ah.itemguid
-        WHERE ah.houseId = {}
-        GROUP BY ii.itemEntry
-    )";
-
-    QueryResult countResult = CharacterDatabase.Query(countQuery, characterDbName, characterDbName, houseId);
-
     std::unordered_map<uint32, uint32> currentCounts;
-    if (countResult)
+    if (ahMgr)
     {
-        do
+        for (auto iter = ahMgr->GetAuctionsBegin(); iter != ahMgr->GetAuctionsEnd(); ++iter)
         {
-            Field* fields = countResult->Fetch();
-            currentCounts[fields[0].Get<uint32>()] = fields[1].Get<uint32>();
-        } while (countResult->NextRow());
+            AuctionEntry* auction = iter->second;
+            if (auction)
+            {
+                currentCounts[auction->item_template]++;
+            }
+        }
     }
 
     std::vector<CachedItem> shuffled = cachedItems;

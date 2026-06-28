@@ -21,6 +21,7 @@ class AuctionatorEvents : public AuctionatorBase
         std::unordered_map<uint32, std::string> eventToFunction;
         AuctionatorConfig* config;
         AuctionatorHouses* houses;
+        uint32 sellerPhase = 0;
 
     public:
         AuctionatorEvents() {};
@@ -30,6 +31,7 @@ class AuctionatorEvents : public AuctionatorBase
         void EventAllianceBidder();
         void EventHordeBidder();
         void EventNeutralBidder();
+        void EventSeller();
         void EventAllianceSeller();
         void EventHordeSeller();
         void EventNeutralSeller();
