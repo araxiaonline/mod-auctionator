@@ -35,9 +35,7 @@ void AuctionatorEvents::InitializeEvents()
             {1, "AllianceBidder"},
             {2, "HordeBidder"},
             {3, "NeutralBidder"},
-            {4, "AllianceSeller"},
-            {5, "HordeSeller"},
-            {6, "NeutralSeller"}
+            {4, "Seller"},
         };
     //
     // schedule the events for our bidders
@@ -56,16 +54,10 @@ void AuctionatorEvents::InitializeEvents()
         events.ScheduleEvent(3, std::chrono::minutes(config->neutralBidder.cycleMinutes));
     }
 
-    if (config->allianceSeller.enabled) {
+    // Single seller event cycles through Alliance → Horde → Neutral once per
+    // minute, so each house runs every 3 minutes with only one DB query per tick.
+    if (config->allianceSeller.enabled || config->hordeSeller.enabled || config->neutralSeller.enabled) {
         events.ScheduleEvent(4, std::chrono::minutes(1));
-    }
-
-    if (config->hordeSeller.enabled) {
-        events.ScheduleEvent(5, std::chrono::minutes(1));
-    }
-
-    if (config->neutralSeller.enabled) {
-        events.ScheduleEvent(6, std::chrono::minutes(1));
     }
 }
 
@@ -102,20 +94,8 @@ void AuctionatorEvents::ExecuteEvents()
                         }
                         break;
                     case 4:
-                        EventAllianceSeller();
-                        if (config->allianceSeller.enabled) {
-                            events.ScheduleEvent(currentEvent, std::chrono::minutes(1));
-                        }
-                        break;
-                    case 5:
-                        EventHordeSeller();
-                        if (config->hordeSeller.enabled) {
-                            events.ScheduleEvent(currentEvent, std::chrono::minutes(1));
-                        }
-                        break;
-                    case 6:
-                        EventNeutralSeller();
-                        if (config->neutralSeller.enabled) {
+                        EventSeller();
+                        if (config->allianceSeller.enabled || config->hordeSeller.enabled || config->neutralSeller.enabled) {
                             events.ScheduleEvent(currentEvent, std::chrono::minutes(1));
                         }
                         break;
@@ -165,6 +145,22 @@ void AuctionatorEvents::EventNeutralBidder()
     logInfo("Starting Neutral Bidder");
     AuctionatorBidder bidder = AuctionatorBidder((uint32)AuctionHouseId::Neutral, auctionatorGuid, config);
     bidder.SpendSomeCash();
+}
+
+void AuctionatorEvents::EventSeller()
+{
+    switch (sellerPhase % 3) {
+        case 0:
+            if (config->allianceSeller.enabled) EventAllianceSeller();
+            break;
+        case 1:
+            if (config->hordeSeller.enabled) EventHordeSeller();
+            break;
+        case 2:
+            if (config->neutralSeller.enabled) EventNeutralSeller();
+            break;
+    }
+    sellerPhase++;
 }
 
 void AuctionatorEvents::EventAllianceSeller()
