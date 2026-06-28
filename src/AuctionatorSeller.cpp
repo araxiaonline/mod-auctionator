@@ -77,10 +77,16 @@ void AuctionatorSeller::LetsGetToIt(uint32 maxCount, uint32 houseId)
 
 
     std::unordered_map<uint32, uint32> currentCounts;
-    for (auto iter = ahMgr->GetAuctionsBegin(); iter != ahMgr->GetAuctionsEnd(); ++iter)
+    if (ahMgr)
     {
-        AuctionEntry* auction = iter->second;
-        currentCounts[auction->item_template] += auction->itemCount;
+        for (auto iter = ahMgr->GetAuctionsBegin(); iter != ahMgr->GetAuctionsEnd(); ++iter)
+        {
+            AuctionEntry* auction = iter->second;
+            if (auction)
+            {
+                currentCounts[auction->item_template]++;
+            }
+        }
     }
 
     std::vector<CachedItem> shuffled = cachedItems;

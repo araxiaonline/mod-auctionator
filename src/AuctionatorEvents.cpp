@@ -149,7 +149,7 @@ void AuctionatorEvents::EventNeutralBidder()
 
 void AuctionatorEvents::EventSeller()
 {
-    switch (sellerPhase % 3) {
+    switch (sellerPhase) {
         case 0:
             if (config->allianceSeller.enabled) EventAllianceSeller();
             break;
@@ -160,7 +160,7 @@ void AuctionatorEvents::EventSeller()
             if (config->neutralSeller.enabled) EventNeutralSeller();
             break;
     }
-    sellerPhase++;
+    sellerPhase = (sellerPhase + 1) % 3;
 }
 
 void AuctionatorEvents::EventAllianceSeller()
