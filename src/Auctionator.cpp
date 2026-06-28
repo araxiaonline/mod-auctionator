@@ -173,7 +173,7 @@ void Auctionator::Initialize()
     NeutralAh = sAuctionMgr->GetAuctionsMapByHouseId(AuctionHouseId::Neutral);
     NeutralAhEntry = sAuctionHouseStore.LookupEntry((uint32)AuctionHouseId::Neutral);
 
-    WorldSession _session(
+    session = new WorldSession(
         config->characterId,
         std::move(accountName),
         0,
@@ -187,8 +187,6 @@ void Auctionator::Initialize()
         false,
         0
     );
-
-    session = &_session;
 }
 
 void Auctionator::InitializeConfig(ConfigMgr* configMgr)
