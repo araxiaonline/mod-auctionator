@@ -18,6 +18,7 @@
 
 Auctionator::Auctionator()
 {
+    session = nullptr;
     SetLogPrefix("[Auctionator] ");
     InitializeConfig(sConfigMgr);
     Initialize();
@@ -36,7 +37,10 @@ Auctionator::Auctionator()
 };
 
 Auctionator::~Auctionator()
-{}
+{
+    delete session;
+    session = nullptr;
+}
 
 void Auctionator::CreateAuction(AuctionatorItem newItem)
 {
@@ -173,7 +177,12 @@ void Auctionator::Initialize()
     NeutralAh = sAuctionMgr->GetAuctionsMapByHouseId(AuctionHouseId::Neutral);
     NeutralAhEntry = sAuctionHouseStore.LookupEntry((uint32)AuctionHouseId::Neutral);
 
-    WorldSession _session(
+    // Heap-allocate: 'session' is a member used later by the seller/bidder
+    // events during World::Update (Player player(session) in CreateAuction).
+    // A stack-local WorldSession would be destroyed when Initialize() returns,
+    // leaving 'session' dangling -> crash once the merged core's Player ctor
+    // reads the (freed) session's RBAC data. Freed in ~Auctionator().
+    session = new WorldSession(
         config->characterId,
         std::move(accountName),
         0, // accountFlags (new WorldSession ctor param)
@@ -187,8 +196,6 @@ void Auctionator::Initialize()
         false,
         0
     );
-
-    session = &_session;
 }
 
 void Auctionator::InitializeConfig(ConfigMgr* configMgr)
