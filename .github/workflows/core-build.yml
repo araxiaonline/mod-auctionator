@@ -1,0 +1,24 @@
+# Builds this module against upstream AzerothCore master.
+#
+# Uses the official AC reusable workflow, which checks out
+# azerothcore/azerothcore-wotlk at ref master, drops this repository into
+# modules/<repo> and runs the core's own linux-build action (NOPCH, clang,
+# -Wall -Wextra -Werror) plus cppcheck over modules/.
+#
+# This is the same gate the official modules use (e.g. azerothcore/mod-ah-bot),
+# so "green here" means "compiles against upstream master", and nothing else is
+# supported: no forks, no patches, no other branch.
+name: core-build
+
+on:
+  push:
+    branches:
+      - 'main'
+      - 'master'
+  pull_request:
+
+jobs:
+  build:
+    uses: azerothcore/reusable-workflows/.github/workflows/core_build_modules.yml@main
+    with:
+      module_repo: ${{ github.event.repository.name }}
