@@ -6,7 +6,9 @@
 #include "AuctionatorConfig.h"
 #include "EventMap.h"
 #include "ObjectMgr.h"
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 class AuctionatorEvents : public AuctionatorBase
 {
@@ -24,10 +26,19 @@ class AuctionatorEvents : public AuctionatorBase
         // Reads the config flag that decides whether an event may run.
         bool IsEventEnabled(uint16 currentEvent) const;
         std::chrono::minutes GetEventInterval(uint16 currentEvent) const;
-        // True (and logs one error line) when the event targets an Alliance/Horde house on a
-        // realm that shares one auction house between the factions, where those houses are
-        // invisible to players. Never true for the neutral house.
-        bool SkipSharedHouseEvent(char const* what, uint32 houseId) const;
+        // True when the event targets an Alliance/Horde house on a realm that shares one
+        // auction house between the factions, where those houses are invisible to players.
+        // Never true for the neutral house. Warns the first time an event is skipped.
+        bool SkipSharedHouseEvent(std::string const& what, uint32 houseId);
+        // The events that already reported being skipped (see SkipSharedHouseEvent).
+        std::unordered_set<std::string> sharedHouseWarned;
+        // The three bidder and the three seller events only differ in the house they act on.
+        void RunBidder(std::string const& faction, uint32 houseId);
+        void RunSeller(std::string const& faction, uint32 houseId, AuctionatorHouseConfig const& houseConfig);
+        // Automatic retention for the market table, run after the timed import and scan.
+        void PruneMarketData();
+        // getMSTime() of the last automatic prune; 0 = none yet.
+        uint32 lastMarketPruneMs = 0;
 
     public:
         AuctionatorEvents() = default;

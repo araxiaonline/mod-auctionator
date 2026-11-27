@@ -14,7 +14,7 @@ struct AuctionatorHouseConfig
 {
     uint32 enabled = 0;
     uint32 maxAuctions = 100;
-    uint32 cycleMinutes = 1;
+    uint32 cycleMinutes = 3;
 };
 
 struct AuctionatorBidderConfig
@@ -62,15 +62,17 @@ struct AuctionatorSellerConfig
     // weighted by traded volume.
     uint32 preferMarketItems = 1;
 
-    // item_template.VerifiedBuild = 1 normally means "not verified by the DB
-    // content team", not "invalid item", so the filter is off by default.
-    // Turning it on drops roughly 30% of the otherwise eligible items.
-    uint32 excludeUnverifiedItems = 0;
+    // 1 = skip item_template rows with VerifiedBuild = 1, which is what the seller always
+    // did before this became an option - so it stays the default and an upgrade does not
+    // suddenly list items the realm never offered. VerifiedBuild = 1 normally means "not
+    // verified by the DB content team", not "invalid item": turning the filter off adds
+    // roughly 30% to the eligible items.
+    uint32 excludeUnverifiedItems = 1;
 
     // Highest effective item level the automatic seller may list; 0 = no limit.
     // A recipe (class 9) is judged by the level of the item its taught spell creates, not by
-    // its own ItemLevel, which is a placeholder on recipes. A recipe whose crafted item cannot
-    // be resolved (enchanting formulas, inert tomes) is never listed, whatever this value is.
+    // its own ItemLevel, which is a placeholder on recipes. While a limit is set, a recipe
+    // whose crafted item cannot be resolved (enchanting formulas, inert tomes) is not listed.
     // Automatic seller only: GM listings are unaffected.
     // Keep in sync with Auctionator::InitializeConfig() and conf/mod_auctionator.conf.dist.
     uint32 maxItemLevel = 0;
@@ -104,6 +106,13 @@ class AuctionatorConfig
         AuctionatorSellerConfig sellerConfig;
 
         uint32 bidOnOwn = 0;
+
+        // 1 = the bidder may also price an item from the realm's own auction house scan
+        // (source 'ah-scan'). Off by default: those rows are the asking prices of the very
+        // players the bidder buys from, and the bidder pays with newly created gold, so a
+        // player could raise the "market" price of an item with a few overpriced listings and
+        // then have the bot buy them. The seller is not affected by this switch.
+        uint32 bidderUseScanPrices = 0;
 
         // Market data older than this many days is ignored on both sides: the
         // seller falls back to item_template.BuyPrice and the bidder to its

@@ -301,9 +301,11 @@ level of the item that spell creates (`SPELL_EFFECT_CREATE_ITEM`): `Plans: Saron
 Swordbreakers` (47623, ItemLevel 85) is refused once the limit is below 245, the level of the
 bracers it teaches (47570).
 
-A recipe whose crafted item cannot be resolved - enchanting formulas, inert tomes and books -
-is never listed, whatever the limit is. GM listings are unaffected. The value is read with the
-candidate pool, so it applies on the next seller run without a restart.
+While a limit is set, a recipe whose crafted item cannot be resolved - enchanting formulas,
+inert tomes and books - is not listed, because its level is unknown. Without a limit (0) nothing
+is gated and those recipes are listed like any other item. GM listings are unaffected.
+`.auctionator maxitemlevel` rebuilds the candidate pool, so it applies on the next seller run
+without a restart.
 
 ```
 .auctionator maxitemlevel 200    # nothing above item level 200 is auto-listed
@@ -365,8 +367,9 @@ are preserved, so `start` resumes exactly what was enabled before.
 ### auctionator expireall <house> [all]
 
 Expire the auctionator's own auctions for the specified house on the next tick.
-Player auctions are left alone unless you pass `all` explicitly (the core then
-returns their items and refunds their bidders, nothing is destroyed). Listings that were
+Player auctions are left alone unless you pass `all` explicitly. Expiring is what the core
+does when an auction runs out: one without a bid is cancelled and its item returned to the
+seller, one that already has a bid is **sold to its highest bidder** at that bid. Listings that were
 created with an explicit owner (`.auctionator add ... me` or a character guid) count as
 somebody else's and need `all` as well.
 
@@ -553,6 +556,10 @@ volume-weighted **per-unit** price (the house stores whole-stack prices, so they
 divided by the stack size), plus the cheapest unit buyout/start bid and the number of
 listings it sampled, as `source = 'ah-scan'`.
 
+* Scan prices are what players are **asking**, so only the **seller** uses them. The bidder
+  ignores `ah-scan` rows unless `Auctionator.Bidder.UseScanPrices = 1`: it pays with newly
+  created gold, and a player could otherwise raise an item's "market" price with a few
+  overpriced listings and have the bot buy them.
 * A listing's **buyout** is preferred. Only items whose listings carry no buyout at all
   fall back to their **start bid**, so a realm running bid-only listings still gets
   prices while items that do have buyouts are not dragged down by reserves.
@@ -701,11 +708,11 @@ candidate query inner-joins it, so a class/subclass pair without a row is never 
 That is why a type is added by creating its rows (the panel's "apply to whole class" does
 this from `mod_auctionator_item_class`) and removed by setting `max_count = 0`.
 
-`item_template.VerifiedBuild = 1` rows are **not** filtered out by default: in most
-world databases that flag means "not verified by the content team", and skipping those
-rows removes a large part of the eligible catalogue (~30% on a stock WotLK world
-database). Set `Auctionator.Seller.ExcludeUnverifiedItems = 1` if your data means
-something else by it.
+`item_template.VerifiedBuild = 1` rows are filtered out by default, as the seller always
+did. In most world databases that flag means "not verified by the content team" rather than
+"invalid item", and skipping those rows removes a large part of the eligible catalogue (~30%
+on a stock WotLK world database): set `Auctionator.Seller.ExcludeUnverifiedItems = 0` to
+list them as well.
 
 `Auctionator.Seller.MaxItemLevel` caps the level the automatic seller may list (`0` = no
 limit); see `.auctionator maxitemlevel` above for how a recipe is judged.

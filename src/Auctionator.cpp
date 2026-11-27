@@ -9,6 +9,7 @@
 #include "DBCStores.h"
 #include "Item.h"
 #include "ObjectMgr.h"
+#include "ScriptMgr.h"
 // MAX_MONEY_AMOUNT, the ceiling RepriceAuction() validates the two prices against.
 #include "Player.h"
 #include "DatabaseEnv.h"
@@ -76,9 +77,9 @@ bool Auctionator::CreateAuction(AuctionatorItem newItem, CharacterDatabaseTransa
         return false;
     }
 
-    if (!session)
+    if (!IsReady())
     {
-        logError("Auctionator CreateAuction failed: session is not initialized.");
+        logError("Auctionator CreateAuction failed: the module is not initialized.");
         return false;
     }
 
@@ -131,7 +132,7 @@ bool Auctionator::CreateAuction(AuctionatorItem newItem, CharacterDatabaseTransa
     // two-side client searches Neutral), so it would be an auction nobody can see or bid on
     // while still occupying the house quota. Refusing is the only safe answer.
     //
-    if (UsesSharedNeutralAuctionHouse() && newItem.houseId != (uint32)AuctionHouseId::Neutral)
+    if (IsHouseHiddenBySharedAuctionHouse(newItem.houseId))
     {
         logError("Auctionator CreateAuction refused: AllowTwoSide.Interaction.Auction is enabled, so houses "
             "2 (alliance) and 6 (horde) are not visible to clients; use house 7 (neutral) instead.");
@@ -266,9 +267,9 @@ bool Auctionator::CreateAuction(AuctionatorItem newItem, CharacterDatabaseTransa
     auctionEntry->SaveToDB(trans);
 
     // Record that this auction is ours, in the same transaction as the auctionhouse row: the
-    // sale log identifies module listings by id (a sale can happen long after a restart, so an
-    // in-memory set would not survive), and `deposit = 0` cannot be used for that - the core
-    // gives player listings a deposit of 0 as well when Rate.Auction.Deposit is 0.
+    // sale log identifies module listings by id (the row is what lets a sale after a restart
+    // still be attributed), and `deposit = 0` cannot be used for that - the core gives player
+    // listings a deposit of 0 as well when Rate.Auction.Deposit is 0.
     AuctionatorSales().RememberCreated(auctionEntry, trans);
 
     // Only close a transaction we opened ourselves; a batched caller commits the whole run.
@@ -282,15 +283,25 @@ bool Auctionator::CreateAuction(AuctionatorItem newItem, CharacterDatabaseTransa
 /**
  * Use this to get access to the AuctionHouseObject pointer for a
  * specific auction house. Ultimately this is just a global singleton.
+ *
+ * Resolved through the manager on every call instead of cached: which object a house id
+ * maps to depends on AllowTwoSide.Interaction.Auction, which a config reload can change.
+ * A cached pointer would then disagree with UsesSharedNeutralAuctionHouse() (and with the
+ * core, which always asks the manager) about where an auction lives.
  */
-AuctionHouseObject* Auctionator::GetAuctionHouse(uint32 houseId) {
+AuctionHouseObject* Auctionator::GetAuctionHouse(uint32 houseId) const {
+    // Null until Initialize() succeeded, which callers use as "not ready".
+    if (!initialized || !sAuctionMgr) {
+        return nullptr;
+    }
+
     switch(houseId) {
         case((uint32)AuctionHouseId::Alliance):
-            return AllianceAh;
+            return sAuctionMgr->GetAuctionsMapByHouseId(AuctionHouseId::Alliance);
         case((uint32)AuctionHouseId::Horde):
-            return HordeAh;
+            return sAuctionMgr->GetAuctionsMapByHouseId(AuctionHouseId::Horde);
         default:
-            return NeutralAh;
+            return sAuctionMgr->GetAuctionsMapByHouseId(AuctionHouseId::Neutral);
     }
 }
 
@@ -320,19 +331,18 @@ uint32 Auctionator::CountAuctions(uint32 houseId)
 
 bool Auctionator::ValidateHouseState(uint32 houseId, AuctionHouseObject*& house, AuctionHouseEntry const*& entry) const
 {
+    house = GetAuctionHouse(houseId);
+
     switch (houseId)
     {
         case (uint32)AuctionHouseId::Alliance:
-            house = AllianceAh;
             entry = AllianceAhEntry;
             break;
         case (uint32)AuctionHouseId::Horde:
-            house = HordeAh;
             entry = HordeAhEntry;
             break;
         case (uint32)AuctionHouseId::Neutral:
         default:
-            house = NeutralAh;
             entry = NeutralAhEntry;
             break;
     }
@@ -343,6 +353,11 @@ bool Auctionator::ValidateHouseState(uint32 houseId, AuctionHouseObject*& house,
 bool Auctionator::UsesSharedNeutralAuctionHouse()
 {
     return sWorld != nullptr && sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_AUCTION);
+}
+
+bool Auctionator::IsHouseHiddenBySharedAuctionHouse(uint32 houseId)
+{
+    return houseId != (uint32)AuctionHouseId::Neutral && UsesSharedNeutralAuctionHouse();
 }
 
 void Auctionator::Initialize()
@@ -359,56 +374,55 @@ void Auctionator::Initialize()
         return;
     }
 
-    if (config->characterId == 0 || config->characterGuid == 0) {
-        logWarn("Auctionator requires valid CharacterId and CharacterGuid before creating session; seller and bidder features stay disabled.");
+    // Only the character is required: it owns every listing. CharacterId (the account of the
+    // dummy session below) is optional, because nothing in the module needs that session any
+    // more - CreateAuction() builds its items without a Player.
+    if (config->characterGuid == 0) {
+        logWarn("Auctionator requires a valid CharacterGuid; seller and bidder features stay disabled.");
         initialized = false;
         return;
     }
 
-    //
-    // The account name handed to the dummy session must be the real one. The core builds
-    // its own sessions with the authenticated account name (WorldSocket.cpp) and only ever
-    // stores this value, but a made up name makes every log line and any future check that
-    // reads it wrong, so it is read from the login database instead of hardcoded.
-    //
-    std::string accountName = "Auctionator";
-    if (QueryResult accountResult = LoginDatabase.Query("SELECT username FROM account WHERE id = {}", config->characterId))
-    {
-        accountName = accountResult->Fetch()[0].Get<std::string>();
-    }
-    else
-    {
-        logWarn("no `account` row with id " + std::to_string(config->characterId)
-            + "; the dummy session is created with a placeholder account name.");
-    }
-
-    HordeAh = sAuctionMgr->GetAuctionsMapByHouseId(AuctionHouseId::Horde);
     HordeAhEntry = sAuctionHouseStore.LookupEntry((uint32)AuctionHouseId::Horde);
-
-    AllianceAh = sAuctionMgr->GetAuctionsMapByHouseId(AuctionHouseId::Alliance);
     AllianceAhEntry = sAuctionHouseStore.LookupEntry((uint32)AuctionHouseId::Alliance);
-
-    NeutralAh = sAuctionMgr->GetAuctionsMapByHouseId(AuctionHouseId::Neutral);
     NeutralAhEntry = sAuctionHouseStore.LookupEntry((uint32)AuctionHouseId::Neutral);
 
-    session = std::make_unique<WorldSession>(
-        config->characterId,
-        std::move(accountName),
-        0,              // accountFlags
-        nullptr,        // WorldSocket
-        SEC_GAMEMASTER,
-        static_cast<uint8>(sWorld->getIntConfig(CONFIG_EXPANSION)),
-        0,
-        LOCALE_enUS,
-        0,
-        false,
-        false,
-        0
-    );
+    if (config->characterId != 0)
+    {
+        //
+        // The account name handed to the dummy session must be the real one. The core builds
+        // its own sessions with the authenticated account name (WorldSocket.cpp) and only ever
+        // stores this value, but a made up name makes every log line and any future check that
+        // reads it wrong, so it is read from the login database instead of hardcoded.
+        //
+        std::string accountName = "Auctionator";
+        if (QueryResult accountResult = LoginDatabase.Query("SELECT username FROM account WHERE id = {}", config->characterId))
+        {
+            accountName = accountResult->Fetch()[0].Get<std::string>();
+        }
+        else
+        {
+            logWarn("no `account` row with id " + std::to_string(config->characterId)
+                + "; the dummy session is created with a placeholder account name.");
+        }
 
-    initialized = session != nullptr && sAuctionMgr != nullptr && sWorld != nullptr &&
-        HordeAh != nullptr && AllianceAh != nullptr && NeutralAh != nullptr &&
-        HordeAhEntry != nullptr && AllianceAhEntry != nullptr && NeutralAhEntry != nullptr;
+        session = std::make_unique<WorldSession>(
+            config->characterId,
+            std::move(accountName),
+            0,              // accountFlags
+            nullptr,        // WorldSocket
+            SEC_GAMEMASTER,
+            static_cast<uint8>(sWorld->getIntConfig(CONFIG_EXPANSION)),
+            0,
+            LOCALE_enUS,
+            0,
+            false,
+            false,
+            0
+        );
+    }
+
+    initialized = HordeAhEntry != nullptr && AllianceAhEntry != nullptr && NeutralAhEntry != nullptr;
 
     ValidateConfiguredCharacter();
 }
@@ -468,8 +482,8 @@ void Auctionator::InitializeConfig(ConfigMgr* configMgr)
         + ", CharacterIds: " + std::to_string(config->characterId)
         + "::" + std::to_string(config->characterGuid));
 
-    if (config->characterId == 0 || config->characterGuid == 0) {
-        logError("Auctionator requires a valid CharacterId and CharacterGuid. Seller and bidder features stay disabled until configured.");
+    if (config->characterGuid == 0) {
+        logError("Auctionator requires a valid CharacterGuid. Seller and bidder features stay disabled until configured.");
     }
 
     config->hordeSeller.enabled = configMgr->GetOption<uint32>("Auctionator.HordeSeller.Enabled", 0);
@@ -480,9 +494,11 @@ void Auctionator::InitializeConfig(ConfigMgr* configMgr)
     config->allianceSeller.maxAuctions = configMgr->GetOption<uint32>("Auctionator.AllianceSeller.MaxAuctions", 50);
     config->neutralSeller.maxAuctions = configMgr->GetOption<uint32>("Auctionator.NeutralSeller.MaxAuctions", 50);
 
-    config->hordeSeller.cycleMinutes = std::max<uint32>(1, configMgr->GetOption<uint32>("Auctionator.HordeSeller.CycleMinutes", 1));
-    config->allianceSeller.cycleMinutes = std::max<uint32>(1, configMgr->GetOption<uint32>("Auctionator.AllianceSeller.CycleMinutes", 1));
-    config->neutralSeller.cycleMinutes = std::max<uint32>(1, configMgr->GetOption<uint32>("Auctionator.NeutralSeller.CycleMinutes", 1));
+    // Default 3: before the houses had their own events one seller event rotated over them on
+    // a one minute timer, so each house was stocked every third minute.
+    config->hordeSeller.cycleMinutes = std::max<uint32>(1, configMgr->GetOption<uint32>("Auctionator.HordeSeller.CycleMinutes", 3));
+    config->allianceSeller.cycleMinutes = std::max<uint32>(1, configMgr->GetOption<uint32>("Auctionator.AllianceSeller.CycleMinutes", 3));
+    config->neutralSeller.cycleMinutes = std::max<uint32>(1, configMgr->GetOption<uint32>("Auctionator.NeutralSeller.CycleMinutes", 3));
 
     config->sellerConfig.auctionsPerRun = configMgr->GetOption<uint32>("Auctionator.Seller.AuctionsPerRun", 100);
     config->sellerConfig.defaultPrice = configMgr->GetOption<uint32>("Auctionator.Seller.DefaultPrice", 1000000);
@@ -517,7 +533,7 @@ void Auctionator::InitializeConfig(ConfigMgr* configMgr)
     config->marketDataScanIntervalMinutes = configMgr->GetOption<uint32>("Auctionator.MarketData.ScanIntervalMinutes", 0);
     config->marketDataScanExcludeSelf = configMgr->GetOption<uint32>("Auctionator.MarketData.ScanExcludeSelf", 1);
     config->sellerConfig.preferMarketItems = configMgr->GetOption<uint32>("Auctionator.Seller.PreferMarketItems", 1);
-    config->sellerConfig.excludeUnverifiedItems = configMgr->GetOption<uint32>("Auctionator.Seller.ExcludeUnverifiedItems", 0);
+    config->sellerConfig.excludeUnverifiedItems = configMgr->GetOption<uint32>("Auctionator.Seller.ExcludeUnverifiedItems", 1);
     config->sellerConfig.maxItemLevel = configMgr->GetOption<uint32>("Auctionator.Seller.MaxItemLevel", 0);
     config->sellerConfig.minPriceModifier = std::max(
         0.0f,
@@ -547,6 +563,7 @@ void Auctionator::InitializeConfig(ConfigMgr* configMgr)
     config->neutralBidder.maxPerCycle = std::min<uint32>(configMgr->GetOption<uint32>("Auctionator.NeutralBidder.MaxPerCycle", 1), MaxBidderPurchasesPerCycle);
 
     config->bidOnOwn = configMgr->GetOption<uint32>("Auctionator.Bidder.BidOnOwn", 0);
+    config->bidderUseScanPrices = configMgr->GetOption<uint32>("Auctionator.Bidder.UseScanPrices", 0);
 
     // Load our multipliers for seller prices
     config->sellerMultipliers.poor
@@ -791,26 +808,41 @@ bool Auctionator::DelistAuction(uint32 auctionId, bool includePlayerAuctions, st
         return false;
     }
 
-    //
-    // Setting expire_time to 0 hands the entry to the core's own expiry path, which is what
-    // makes this safe: on the next AuctionHouseObject::Update() tick the item is mailed back
-    // to its owner, the in-memory item is dropped and the row is deleted. This is the same
-    // mechanism ".auctionator expireall" uses, so no mail or item bookkeeping is reimplemented
-    // here - and the configured auctionator's auction mail is recycled by the mail script, so
-    // the gold sink keeps holding for the bot's own stock.
-    //
-    // The row's own `time` is zeroed too: that column is what a restart reloads, and without
-    // it a worldserver that went down inside the minute before the next tick would bring the
-    // "delisted" auction back as if nothing had happened.
-    //
-    auction->expire_time = 0;
-    CharacterDatabase.Execute("UPDATE auctionhouse SET time = 0 WHERE id = {}", auctionId);
+    AuctionHouseObject* house = GetAuctionHouse((uint32)auction->houseId);
+    if (!house || house->GetAuction(auctionId) != auction)
+    {
+        error = "auction " + std::to_string(auctionId) + " is not in the house its house id names.";
+        return false;
+    }
 
     logInfo("delist: auction " + std::to_string(auctionId)
         + " (house " + std::to_string((uint32)auction->houseId)
         + ", item " + std::to_string(auction->item_template)
         + " x" + std::to_string(auction->itemCount)
-        + ") queued for expiry; its item goes back to the owner.");
+        + ") taken down; its item goes back to the owner.");
+
+    //
+    // Taken down now, with exactly the calls AuctionHouseObject::Update() makes for an expired
+    // auction without a bidder - the item is mailed back to its owner (the configured
+    // auctionator's auction mail is recycled by the mail script, so the gold sink keeps
+    // holding for the bot's own stock), the row is deleted and the entry leaves the house and
+    // the search index.
+    //
+    // It used to only zero expire_time and leave the rest to the next house tick, up to a
+    // minute later. Until then the listing stayed visible and buyable, and a bid placed in
+    // that window turned the "delist" into a sale to that bidder.
+    //
+    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+
+    sAuctionMgr->SendAuctionExpiredMail(auction, trans);
+    sScriptMgr->OnAuctionExpire(house, auction);
+
+    auction->DeleteFromDB(trans);
+    sAuctionMgr->RemoveAItem(auction->item_guid);
+    // Deletes the entry: `auction` is gone after this line.
+    house->RemoveAuction(auction);
+
+    CharacterDatabase.CommitTransaction(trans);
 
     return true;
 }

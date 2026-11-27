@@ -15,7 +15,9 @@
 #include "DatabaseEnv.h"
 #include "CharacterCache.h"
 #include "AuctionatorMarketData.h"
+#include "AuctionatorSeller.h"
 #include "Optional.h"
+#include "StringConvert.h"
 
 using namespace Acore::ChatCommands;
 
@@ -31,34 +33,29 @@ namespace
     // and std::llround() is undefined for out of range results.
     float const MaxPriceMultiplier = 1000.0f;
 
+    // Thin wrappers over the core's strict parsers (no sign, no trailing characters, no
+    // overflow), kept only for the bool + out-parameter shape the commands below use.
+    // Base 10 is explicit: left to itself the core parser also reads "0x10" and "0b10".
     bool TryParseUInt32(const std::string& value, uint32& result)
     {
-        try {
-            size_t idx = 0;
-            unsigned long long parsed = std::stoull(value, &idx, 10);
-            if (idx != value.size() || parsed > std::numeric_limits<uint32>::max()) {
-                return false;
-            }
-            result = static_cast<uint32>(parsed);
-            return true;
-        } catch (const std::exception&) {
+        Optional<uint32> const parsed = Acore::StringTo<uint32>(value, 10);
+        if (!parsed) {
             return false;
         }
+
+        result = *parsed;
+        return true;
     }
 
     bool TryParseFloat(const std::string& value, float& result)
     {
-        try {
-            size_t idx = 0;
-            float parsed = std::stof(value, &idx);
-            if (idx != value.size()) {
-                return false;
-            }
-            result = parsed;
-            return true;
-        } catch (const std::exception&) {
+        Optional<float> const parsed = Acore::StringTo<float>(value);
+        if (!parsed) {
             return false;
         }
+
+        result = *parsed;
+        return true;
     }
 
     // How a GM listing prices its start bid and its buyout.
@@ -675,7 +672,7 @@ class AuctionatorCommands : public CommandScript
             // CreateAuction() refuses it too - this check only replaces its log line with a
             // GM-readable reason.
             //
-            if (auctionHouseId != (uint32)AuctionHouseId::Neutral && Auctionator::UsesSharedNeutralAuctionHouse())
+            if (Auctionator::IsHouseHiddenBySharedAuctionHouse(auctionHouseId))
             {
                 handler->SendSysMessage("[Auctionator] add: AllowTwoSide.Interaction.Auction is enabled on this realm, "
                     "so all players share the neutral house; house " + std::to_string(auctionHouseId)
@@ -962,7 +959,7 @@ class AuctionatorCommands : public CommandScript
                 }
 
                 // See CommandAdd: on a shared-house realm only the neutral house is visible.
-                if (house != (uint32)AuctionHouseId::Neutral && Auctionator::UsesSharedNeutralAuctionHouse())
+                if (Auctionator::IsHouseHiddenBySharedAuctionHouse(house))
                 {
                     handler->SendSysMessage("[Auctionator] addlist: skipping item " + std::to_string(itemId)
                         + " (house " + std::to_string(house) + ", but AllowTwoSide.Interaction.Auction is enabled: "
@@ -1299,8 +1296,8 @@ buyout <0|1>
      file so the choice survives a restart.
 maxitemlevel <value|off>
      Highest item level the AUTOMATIC seller may list; off or 0 = no limit.
-     A recipe counts as the item it makes, not as its own ItemLevel, and a recipe
-     whose crafted item cannot be resolved is never listed. GM listings (add /
+     A recipe counts as the item it makes, not as its own ItemLevel; while a limit is
+     set, a recipe whose crafted item cannot be resolved is not listed. GM listings (add /
      addlist / mod_auctionator_gm_list) are unaffected. Takes effect on the next
      seller run; the panel's item filter tab writes the option file.
 disable <hordeseller|allianceseller|neutralseller|hordebidder|alliancebidder|neutralbidder|all>
@@ -1313,10 +1310,11 @@ stop | off
      runtime master switch OFF: clears the pending events. Already listed auctions stay.
 expireall <house> [all]
      without "all" only the auctionator's own auctions are expired; listings
-     created with an explicit owner need "all"
+     created with an explicit owner need "all". An expired auction that has a
+     bid is sold to its highest bidder, as if it had run out.
 delist <auctionId> [all]
-     take ONE auction down by id (the panel's listing table shows the id). The
-     item is mailed back to the owner on the next auction house tick. Refused
+     take ONE auction down by id (the panel's listing table shows the id), at
+     once. The item is mailed back to the owner. Refused
      for an auction that already has a bid, and without "all" for one the
      auctionator does not own.
 reprice <auctionId> <startbid> <buyout> [all]
@@ -1361,8 +1359,8 @@ help
             {
                 statusString += " NOTE: AllowTwoSide.Interaction.Auction is enabled, so the three houses share one\n";
                 statusString += "       object and only the neutral house (7) is visible to players. Houses 2 and 6\n";
-                statusString += "       are refused by the add/addlist commands and their seller/bidder events do\n";
-                statusString += "       nothing but log an error; use Auctionator.NeutralSeller / NeutralBidder.\n";
+                statusString += "       are refused by the add/addlist commands and their seller/bidder events are\n";
+                statusString += "       skipped; use Auctionator.NeutralSeller / NeutralBidder.\n";
             }
 
             statusString += " Horde:\n";
@@ -1473,8 +1471,10 @@ help
 
             if (includePlayerAuctions)
             {
-                handler->SendSysMessage("[Auctionator] expireall: WARNING - \"all\" also cancels player auctions in house "
-                    + std::to_string(houseId) + " (their items and bids are returned by the core, nothing is destroyed).");
+                handler->SendSysMessage("[Auctionator] expireall: WARNING - \"all\" also ends player auctions in house "
+                    + std::to_string(houseId) + ". An auction without a bid is cancelled and its item returned to the "
+                      "seller; an auction that already has a bid is SOLD to its highest bidder at that bid, exactly as "
+                      "if it had run out. Nothing is destroyed, but those sales cannot be undone.");
             }
             else
             {
@@ -1538,9 +1538,8 @@ help
             }
 
             ReplyAcked(handler, true, "[Auctionator] delist: auction " + std::to_string(auctionId)
-                + " is now cancelled. Its item is mailed back to the owner on the next auction "
-                  "house tick (about a minute); the bot's own mail is recycled, so its stock "
-                  "simply disappears.");
+                + " is cancelled and no longer listed. Its item is mailed back to the owner; "
+                  "the bot's own mail is recycled, so its stock simply disappears.");
 
             return true;
         }
@@ -1916,11 +1915,13 @@ help
             WarnIfModuleDisabled(handler, auctionator);
 
             auctionator->config->sellerConfig.maxItemLevel = maxItemLevel;
+            // The limit is applied while the candidate pool is built, and the pool is cached.
+            AuctionatorSeller::InvalidatePool();
 
             if (maxItemLevel == 0)
             {
                 handler->SendSysMessage("[Auctionator] maxitemlevel: no limit (Auctionator.Seller.MaxItemLevel = 0). "
-                    "Recipes whose crafted item cannot be resolved stay unlisted. Takes effect on the next seller run.");
+                    "Takes effect on the next seller run.");
                 auctionator->logInfo("maxitemlevel: no limit (Auctionator.Seller.MaxItemLevel = 0)");
             }
             else

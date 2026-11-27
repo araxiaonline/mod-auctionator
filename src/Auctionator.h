@@ -45,15 +45,14 @@ class Auctionator : public AuctionatorBase
         Auctionator(Auctionator const&) = delete;
         Auctionator& operator=(Auctionator const&) = delete;
         bool initialized = false;
-        // Always initialized: Initialize() may bail out early (no valid
-        // CharacterId/CharacterGuid, missing world/auction manager) and neither the
-        // destructor nor the callers may ever see indeterminate pointers.
-        AuctionHouseObject* HordeAh = nullptr;
-        AuctionHouseObject* AllianceAh = nullptr;
-        AuctionHouseObject* NeutralAh = nullptr;
+        // Always initialized: Initialize() may bail out early (no valid CharacterGuid,
+        // missing world/auction manager) and neither the destructor nor the callers may
+        // ever see indeterminate pointers. The house objects themselves are not cached, see
+        // GetAuctionHouse().
         AuctionHouseEntry const* HordeAhEntry = nullptr;
         AuctionHouseEntry const* AllianceAhEntry = nullptr;
         AuctionHouseEntry const* NeutralAhEntry = nullptr;
+        // Only created when Auctionator.CharacterId is set; nothing in the module needs it.
         // unique_ptr for ownership; Shutdown() resets while DB pools are alive.
         // Destructor releases without delete if Shutdown was skipped (see .cpp).
         std::unique_ptr<WorldSession> session;
@@ -76,6 +75,9 @@ class Auctionator : public AuctionatorBase
         // their entries would end up in a partition no client ever queries, i.e. an
         // auction nobody can see or bid on while still occupying the house quota.
         static bool UsesSharedNeutralAuctionHouse();
+        // True for houses 2/6 on such a realm, i.e. for a house the module must not list in
+        // or bid from. The one test every caller uses, so they cannot drift apart.
+        static bool IsHouseHiddenBySharedAuctionHouse(uint32 houseId);
         // includePlayerAuctions = false expires only auctions owned by the
         // configured auctionator character; true expires every auction of that house.
         void ExpireAllAuctions(uint32 houseId, bool includePlayerAuctions = false);
@@ -84,9 +86,10 @@ class Auctionator : public AuctionatorBase
         // CONFIG_ALLOW_TWO_SIDE_INTERACTION_AUCTION makes all three of them the same
         // object, so every house is probed instead of trusting a caller supplied one.
         AuctionEntry* FindAuction(uint32 auctionId);
-        // Takes one auction down by handing it to the core's own expiry path, which mails
-        // the item back to its owner (the mail script recycles the configured
-        // auctionator's auction mail, so the gold sink still holds) and deletes the row.
+        // Takes one auction down at once, the way the core expires an auction without a
+        // bidder: the item is mailed back to its owner (the mail script recycles the
+        // configured auctionator's auction mail, so the gold sink still holds) and the row is
+        // deleted.
         // Refused when the auction already has a bid, because expiring that one *sells*
         // it to the bidder instead of cancelling it - the exact opposite of "take it
         // down" - and when the auctionator does not own it, unless
@@ -100,7 +103,7 @@ class Auctionator : public AuctionatorBase
         // Same bid/ownership restrictions as DelistAuction.
         bool RepriceAuction(uint32 auctionId, uint32 startbid, uint32 buyout,
             bool includePlayerAuctions, std::string& error);
-        AuctionHouseObject* GetAuctionHouse(uint32 houseId);
+        AuctionHouseObject* GetAuctionHouse(uint32 houseId) const;
         // Number of auctions of one house. It counts by AuctionEntry::houseId instead of
         // using the house object's size, because with
         // CONFIG_ALLOW_TWO_SIDE_INTERACTION_AUCTION all three houses share one object.
@@ -127,7 +130,7 @@ class Auctionator : public AuctionatorBase
         bool SetEnabled(bool enabled);
         bool IsReady() const
         {
-            return initialized && config && session && sAuctionMgr && sWorld;
+            return initialized && config && sAuctionMgr && sWorld;
         }
 
         static float GetQualityMultiplier(AuctionatorPriceMultiplierConfig const& config, uint32 quality);

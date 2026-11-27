@@ -1,7 +1,11 @@
 
 #include "AuctionatorMarketData.h"
+#include "AuctionatorSeller.h"
 #include "DatabaseEnv.h"
+#include "Optional.h"
 #include "QueryResult.h"
+#include "StringConvert.h"
+#include "StringFormat.h"
 
 #include <algorithm>
 #include <cctype>
@@ -21,7 +25,7 @@ namespace
 
     // `source` value of a row this module produced by sampling the realm's own auction house,
     // so those rows can be told apart from an imported CSV feed (and pruned separately).
-    std::string const ScanSource = "ah-scan";
+    std::string const ScanSource = AuctionatorMarketScanSource;
 
     // Auction house prices are stored for the whole stack in columns that are unsigned, so a
     // single unit price can exceed the signed INT the market table uses. Clamping in SQL keeps
@@ -39,42 +43,18 @@ namespace
     std::uintmax_t lastImportSize = 0;
     std::filesystem::file_time_type lastImportWriteTime{};
 
-    std::string Trim(std::string const& value)
-    {
-        size_t const first = value.find_first_not_of(" \t\r\n");
-        if (first == std::string::npos)
-        {
-            return std::string();
-        }
-
-        size_t const last = value.find_last_not_of(" \t\r\n");
-        return value.substr(first, last - first + 1);
-    }
-
+    // Unsigned decimal, surrounding whitespace allowed (CSV fields are often padded). The core
+    // helper is strict about everything else: no sign, no trailing characters, no overflow.
     bool TryParseUInt(std::string const& value, uint32& result)
     {
-        std::string const trimmed = Trim(value);
-        if (trimmed.empty() || !std::all_of(trimmed.begin(), trimmed.end(), [](unsigned char ch) { return std::isdigit(ch) != 0; }))
+        Optional<uint32> const parsed = Acore::StringTo<uint32>(Acore::String::Trim(value), 10);
+        if (!parsed)
         {
             return false;
         }
 
-        try
-        {
-            size_t idx = 0;
-            unsigned long long const parsed = std::stoull(trimmed, &idx, 10);
-            if (idx != trimmed.size() || parsed > 0xFFFFFFFFull)
-            {
-                return false;
-            }
-
-            result = static_cast<uint32>(parsed);
-            return true;
-        }
-        catch (std::exception const&)
-        {
-            return false;
-        }
+        result = *parsed;
+        return true;
     }
 
     // The columns this class writes (entry, average_price, buyout, bid, count) are signed
@@ -99,7 +79,8 @@ namespace
     // because the value is embedded in the generated SQL; the individual fields are range
     // checked as well, so a typo such as '2026-13-45 99:99:99' is rejected as invalid
     // instead of failing the batch that contains it.
-    bool TryParseUIntField(std::string const& value, size_t offset, size_t length, uint32 minValue, uint32 maxValue)
+    bool TryParseUIntField(std::string const& value, size_t offset, size_t length, uint32 minValue, uint32 maxValue,
+        uint32* out = nullptr)
     {
         uint32 parsed = 0;
         if (!TryParseUInt(value.substr(offset, length), parsed))
@@ -107,7 +88,20 @@ namespace
             return false;
         }
 
+        if (out)
+        {
+            *out = parsed;
+        }
+
         return parsed >= minValue && parsed <= maxValue;
+    }
+
+    uint32 DaysInMonth(uint32 year, uint32 month)
+    {
+        static uint32 const days[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+
+        bool const leapYear = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+        return month == 2 && leapYear ? 29 : days[month - 1];
     }
 
     bool IsDateTimeText(std::string const& value)
@@ -137,12 +131,15 @@ namespace
             }
         }
 
-        // Ranges: year 1970..2100 keeps typos out of the history table, and day 1..31
-        // accepts every month (MySQL itself rejects values such as 2026-02-30, which is a
-        // one row problem at worst because the shape checks above already passed).
-        return TryParseUIntField(value, 0, 4, 1970, 2100)
-            && TryParseUIntField(value, 5, 2, 1, 12)
-            && TryParseUIntField(value, 8, 2, 1, 31)
+        // Ranges: year 1970..2100 keeps typos out of the history table. The day is checked
+        // against the month, because MySQL rejects a date such as 2026-02-30 - and the rows are
+        // batched into one transaction, so that single row would roll back the whole import.
+        uint32 year = 0;
+        uint32 month = 0;
+
+        return TryParseUIntField(value, 0, 4, 1970, 2100, &year)
+            && TryParseUIntField(value, 5, 2, 1, 12, &month)
+            && TryParseUIntField(value, 8, 2, 1, DaysInMonth(year, month))
             && (!withTime
                 || (TryParseUIntField(value, 11, 2, 0, 23)
                     && TryParseUIntField(value, 14, 2, 0, 59)
@@ -360,7 +357,7 @@ AuctionatorMarketData::ImportResult AuctionatorMarketData::ImportFromFile(std::s
             continue;
         }
 
-        std::string const scanDatetime = Trim(fields[0]);
+        std::string const scanDatetime = Acore::String::Trim(fields[0]);
         uint32 entry = 0;
         uint32 averagePrice = 0;
 
@@ -413,7 +410,44 @@ AuctionatorMarketData::ImportResult AuctionatorMarketData::ImportFromFile(std::s
     }
 
     flushBatch();
-    CharacterDatabase.CommitTransaction(trans);
+
+    //
+    // Committed synchronously and then checked. CommitTransaction() only queues the
+    // transaction, so this function used to report success - and remember the file as
+    // imported, which keeps the timer from ever reading it again - before the database had
+    // seen a single row. A transaction the server then rejected lost the whole import
+    // without a trace outside the sql log.
+    //
+    // DirectCommitTransaction() returns nothing, so the outcome is read back: every row this
+    // import wrote (inserted or updated) carries imported_at = CURRENT_TIMESTAMP, and the
+    // transaction is all or nothing, so "no row stamped since the import began" means it was
+    // rolled back. Both timestamps come from the database's own clock.
+    //
+    uint64 importStarted = 0;
+    if (QueryResult clock = CharacterDatabase.Query("SELECT UNIX_TIMESTAMP()"))
+    {
+        importStarted = clock->Fetch()[0].Get<uint64>();
+    }
+
+    CharacterDatabase.DirectCommitTransaction(trans);
+
+    if (result.imported > 0)
+    {
+        QueryResult written = CharacterDatabase.Query(
+            "SELECT 1 FROM " + MarketTableName + " WHERE imported_at >= FROM_UNIXTIME({}) LIMIT 1", importStarted);
+
+        if (!written)
+        {
+            logError("market import from " + path + " failed: the database rejected the transaction, so none of the "
+                + std::to_string(result.imported) + " row(s) were written (the reason is in the sql log). "
+                  "The file will be read again on the next import.");
+            lastImportValid = false;
+            return result;
+        }
+
+        // The seller's cached pool carries the previous prices.
+        AuctionatorSeller::InvalidatePool();
+    }
 
     // The file is remembered even when every line was rejected: re-reading it on every cycle
     // would not change the outcome, and "marketimport force" is available when it does change.
@@ -570,7 +604,12 @@ AuctionatorMarketData::ScanResult AuctionatorMarketData::ScanAuctionHouse(uint32
           "  WHERE ii.itemEntry > 0 AND ii.count > 0" + ownerFilter
         + "  GROUP BY ii.itemEntry"
           " ) s"
-          " WHERE s.average_price >= 1";
+          " WHERE s.average_price >= 1"
+          // The timestamp has one second resolution and (entry, scan_datetime) is the primary
+          // key: a second scan within the same second (the GM command right after the timer,
+          // two panel clicks) would otherwise fail as a whole with a duplicate key.
+          " ON DUPLICATE KEY UPDATE average_price = VALUES(average_price), buyout = VALUES(buyout),"
+          " bid = VALUES(bid), `count` = VALUES(`count`), source = VALUES(source), imported_at = CURRENT_TIMESTAMP";
 
     // DirectExecute, not Execute: the count below has to see this statement's rows, and Execute
     // only queues the query on the database thread pool. (Neither returns a status - a rejected
@@ -592,6 +631,12 @@ AuctionatorMarketData::ScanResult AuctionatorMarketData::ScanAuctionHouse(uint32
 
     result.ok = true;
 
+    if (result.rows > 0)
+    {
+        // The seller's cached pool carries the previous prices.
+        AuctionatorSeller::InvalidatePool();
+    }
+
     if (result.rows == 0)
     {
         if (excludeOwner != 0 && result.skippedSelf == result.totalListings)
@@ -607,10 +652,12 @@ AuctionatorMarketData::ScanResult AuctionatorMarketData::ScanAuctionHouse(uint32
         }
         else
         {
-            logWarn("market scan wrote nothing although the house holds " + std::to_string(result.totalListings)
+            // Every listing has a start bid or a buyout, so sampled listings that produce no
+            // row mean the statement itself was rejected: that is a failed scan, not an empty one.
+            result.ok = false;
+            logError("market scan failed: it wrote nothing although the house holds " + std::to_string(result.totalListings)
                 + " usable listing(s) and " + std::to_string(result.totalListings - result.skippedSelf)
-                + " were sampled. If the aggregation was rejected the reason is in the sql log; "
-                  "otherwise no sampled listing carried a price at all.");
+                + " were sampled. The reason the aggregation was rejected is in the sql log.");
         }
     }
     else

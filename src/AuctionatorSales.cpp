@@ -6,6 +6,7 @@
 
 #include <map>
 #include <string>
+#include <unordered_set>
 
 namespace
 {
@@ -23,6 +24,18 @@ namespace
     // recorded rather than re-derived later, because the only field that used to identify a
     // module listing - deposit = 0 - also matches every player listing on a realm whose
     // Rate.Auction.Deposit is 0.
+    //
+    // Ids of the live auctions this module created: the in-memory side of
+    // mod_auctionator_auction, loaded once at startup and kept in step by RememberCreated() and
+    // Forget(). The sale hook asks this set, so a sale costs no blocking database round trip
+    // (it used to run one SELECT per sale - player-to-player sales included - on the world
+    // thread).
+    //
+    // Only the world thread creates, sells and removes auctions, so this needs no locking.
+    //
+    std::unordered_set<uint32> LiveModuleAuctions;
+    bool RegistryLoaded = false;
+
     char const* const InsertSaleSql =
         "INSERT INTO mod_auctionator_sale "
         "(auction_id, item_entry, item_count, house_id, seller_guid, seller_is_bot, module_listing, "
@@ -72,6 +85,46 @@ bool AuctionatorSales::TableIsReady(std::string const& table, std::string const&
     return ready;
 }
 
+void AuctionatorSales::LoadRegistry()
+{
+    if (RegistryLoaded || !TableIsReady(RegistryTableName, RegistryUpdateFile))
+    {
+        return;
+    }
+
+    RegistryLoaded = true;
+
+    //
+    // An auction id is NOT unique over the life of a realm: the core restarts its counter at
+    // MAX(auctionhouse.id) + 1 on every startup (ObjectMgr::SetHighestGuids), so once the
+    // newest auctions have sold or expired their ids are handed out again. A registry row that
+    // outlived its auction would then (a) collide with the row of the module's next listing,
+    // and (b) make a player's auction that inherited the id look like a module listing.
+    //
+    // So the registry only ever describes live auctions. Rows are dropped when their auction
+    // is removed (Forget()), and whatever a crash or an older build left behind is dropped
+    // here, before any id can be reused: the world is still starting, nobody can list yet.
+    // The owner is compared as well, which also catches an id that was already reused by a
+    // player while an older build was running.
+    //
+    CharacterDatabase.DirectExecute(
+        "DELETE r FROM " + RegistryTableName + " r "
+        "LEFT JOIN auctionhouse ah ON ah.id = r.auction_id AND ah.itemowner = r.owner_guid "
+        "WHERE ah.id IS NULL");
+
+    LiveModuleAuctions.clear();
+
+    if (QueryResult result = CharacterDatabase.Query("SELECT auction_id FROM " + RegistryTableName))
+    {
+        do
+        {
+            LiveModuleAuctions.insert(result->Fetch()[0].Get<uint32>());
+        } while (result->NextRow());
+    }
+
+    logInfo("registry loaded: " + std::to_string(LiveModuleAuctions.size()) + " live module auction(s)");
+}
+
 void AuctionatorSales::RememberCreated(AuctionEntry const* auction, CharacterDatabaseTransaction trans)
 {
     if (!auction || !trans || !TableIsReady(RegistryTableName, RegistryUpdateFile))
@@ -79,26 +132,35 @@ void AuctionatorSales::RememberCreated(AuctionEntry const* auction, CharacterDat
         return;
     }
 
-    // Append-only, and deliberately never deleted: an auction id is not reused within a realm
-    // (sObjectMgr->GenerateAuctionID() is max+1), so keeping the row after the auction ends is
-    // what lets a sale recorded later still be attributed to the module.
-    trans->Append("INSERT INTO " + RegistryTableName + " (auction_id, owner_guid, item_entry) VALUES ("
+    LoadRegistry();
+    LiveModuleAuctions.insert(auction->Id);
+
+    // REPLACE, not INSERT: the caller's transaction also carries the item and auction rows of
+    // a whole seller run, and a duplicate key here would roll all of them back while the
+    // auctions stay alive in memory. LoadRegistry() and Forget() keep stale ids out of the
+    // table, so this is only the last line of defence.
+    trans->Append("REPLACE INTO " + RegistryTableName + " (auction_id, owner_guid, item_entry) VALUES ("
         + std::to_string(auction->Id) + ", "
         + std::to_string(auction->owner.GetCounter()) + ", "
         + std::to_string(auction->item_template) + ")");
 }
 
-bool AuctionatorSales::IsRegistered(uint32 auctionId)
+void AuctionatorSales::Forget(uint32 auctionId)
 {
-    if (!TableIsReady(RegistryTableName, RegistryUpdateFile))
+    // Called for every auction the core removes, so the common case (a player auction, or a
+    // realm that does not use the module at all) has to stay this one hash lookup.
+    if (LiveModuleAuctions.erase(auctionId) == 0)
     {
-        return false;
+        return;
     }
 
-    QueryResult result = CharacterDatabase.Query(
-        "SELECT 1 FROM " + RegistryTableName + " WHERE auction_id = {}", auctionId);
+    CharacterDatabase.Execute("DELETE FROM " + RegistryTableName + " WHERE auction_id = {}", auctionId);
+}
 
-    return result != nullptr;
+bool AuctionatorSales::IsRegistered(uint32 auctionId)
+{
+    LoadRegistry();
+    return LiveModuleAuctions.find(auctionId) != LiveModuleAuctions.end();
 }
 
 void AuctionatorSales::RecordSale(AuctionEntry const* auction)

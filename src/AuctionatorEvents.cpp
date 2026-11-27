@@ -4,6 +4,7 @@
 #include "AuctionatorSeller.h"
 #include "AuctionatorMarketData.h"
 #include "Log.h"
+#include "Timer.h"
 #include <algorithm>
 #include <chrono>
 #include <exception>
@@ -160,18 +161,26 @@ void AuctionatorEvents::RescheduleEvent(uint16 currentEvent)
     }
 }
 
-bool AuctionatorEvents::SkipSharedHouseEvent(char const* what, uint32 houseId) const
+bool AuctionatorEvents::SkipSharedHouseEvent(std::string const& what, uint32 houseId)
 {
-    if (houseId == (uint32)AuctionHouseId::Neutral || !Auctionator::UsesSharedNeutralAuctionHouse())
+    if (!Auctionator::IsHouseHiddenBySharedAuctionHouse(houseId))
     {
+        sharedHouseWarned.erase(what);
         return false;
     }
 
-    // One line per event per cycle. Without this check the seller would log "count is good,
-    // here we go" and only then be refused by AuctionatorSeller, which reads like a bug.
-    logError(std::string(what ? what : "event") + " skipped for house " + std::to_string(houseId)
-        + ": AllowTwoSide.Interaction.Auction is enabled, so only house 7 (neutral) is visible to players. "
-          "Enable Auctionator.NeutralSeller / Auctionator.NeutralBidder and leave the 2/6 ones disabled.");
+    // Without this check the seller would log "count is good, here we go" and only then be
+    // refused by AuctionatorSeller, which reads like a bug. Reported once per event rather
+    // than on every cycle: the default alliance/horde setup on a shared-house realm would
+    // otherwise write this line every few minutes for as long as the realm runs.
+    if (sharedHouseWarned.insert(what).second)
+    {
+        logWarn(what + " skipped for house " + std::to_string(houseId)
+            + ": AllowTwoSide.Interaction.Auction is enabled, so only house 7 (neutral) is visible to players. "
+              "Enable Auctionator.NeutralSeller / Auctionator.NeutralBidder and leave the 2/6 ones disabled. "
+              "(Reported once; the event keeps being skipped.)");
+    }
+
     return true;
 }
 
@@ -282,140 +291,111 @@ void AuctionatorEvents::SetPlayerGuid(ObjectGuid playerGuid)
     auctionatorGuid = playerGuid;
 }
 
-void AuctionatorEvents::EventAllianceBidder()
+void AuctionatorEvents::RunBidder(std::string const& faction, uint32 houseId)
 {
     if (!config) {
-        logError("Alliance bidder skipped: config is null.");
+        logError(faction + " bidder skipped: config is null.");
         return;
     }
 
-    if (SkipSharedHouseEvent("Alliance bidder", (uint32)AuctionHouseId::Alliance)) {
+    if (SkipSharedHouseEvent(faction + " bidder", houseId)) {
         return;
     }
 
-    logInfo("Starting Alliance Bidder");
-    AuctionatorBidder bidder = AuctionatorBidder((uint32)AuctionHouseId::Alliance, auctionatorGuid, config);
+    logInfo("Starting " + faction + " Bidder");
+    AuctionatorBidder bidder = AuctionatorBidder(houseId, auctionatorGuid, config);
     bidder.SpendSomeCash();
+}
+
+void AuctionatorEvents::RunSeller(std::string const& faction, uint32 houseId, AuctionatorHouseConfig const& houseConfig)
+{
+    // GetAuctionHouse() stays null until Initialize() succeeded.
+    if (!config || !Auctionator::getInstance()->GetAuctionHouse(houseId)) {
+        logError(faction + " auction house is not initialized.");
+        return;
+    }
+
+    if (SkipSharedHouseEvent(faction + " seller", houseId)) {
+        return;
+    }
+
+    uint32 const auctionCount = Auctionator::getInstance()->CountAuctions(houseId);
+    if (auctionCount < houseConfig.maxAuctions) {
+        logInfo(
+            faction + " count is good, here we go: "
+            + std::to_string(auctionCount)
+            + " of " + std::to_string(houseConfig.maxAuctions)
+        );
+
+        AuctionatorSeller seller = AuctionatorSeller(Auctionator::getInstance());
+        seller.LetsGetToIt(config->sellerConfig.auctionsPerRun, houseId);
+    } else {
+        logInfo(faction + " count over max: " + std::to_string(auctionCount));
+    }
+}
+
+void AuctionatorEvents::EventAllianceBidder()
+{
+    RunBidder("Alliance", (uint32)AuctionHouseId::Alliance);
 }
 
 void AuctionatorEvents::EventHordeBidder()
 {
-    if (!config) {
-        logError("Horde bidder skipped: config is null.");
-        return;
-    }
-
-    if (SkipSharedHouseEvent("Horde bidder", (uint32)AuctionHouseId::Horde)) {
-        return;
-    }
-
-    logInfo("Starting Horde Bidder");
-    AuctionatorBidder bidder = AuctionatorBidder((uint32)AuctionHouseId::Horde, auctionatorGuid, config);
-    bidder.SpendSomeCash();
+    RunBidder("Horde", (uint32)AuctionHouseId::Horde);
 }
 
 void AuctionatorEvents::EventNeutralBidder()
 {
-    if (!config) {
-        logError("Neutral bidder skipped: config is null.");
-        return;
-    }
-
-    if (SkipSharedHouseEvent("Neutral bidder", (uint32)AuctionHouseId::Neutral)) {
-        return;
-    }
-
-    logInfo("Starting Neutral Bidder");
-    AuctionatorBidder bidder = AuctionatorBidder((uint32)AuctionHouseId::Neutral, auctionatorGuid, config);
-    bidder.SpendSomeCash();
+    RunBidder("Neutral", (uint32)AuctionHouseId::Neutral);
 }
 
 void AuctionatorEvents::EventAllianceSeller()
 {
-    // GetAuctionHouse() stays null until Initialize() resolved the house maps.
-    if (!config || !Auctionator::getInstance()->GetAuctionHouse((uint32)AuctionHouseId::Alliance)) {
-        logError("Alliance auction house is not initialized.");
-        return;
-    }
-
-    if (SkipSharedHouseEvent("Alliance seller", (uint32)AuctionHouseId::Alliance)) {
-        return;
-    }
-
-    uint32 const auctionCountAlliance = Auctionator::getInstance()->CountAuctions((uint32)AuctionHouseId::Alliance);
-    if (auctionCountAlliance < config->allianceSeller.maxAuctions) {
-        logInfo(
-            "Alliance count is good, here we go: "
-            + std::to_string(auctionCountAlliance)
-            + " of " + std::to_string(config->allianceSeller.maxAuctions)
-        );
-
-        AuctionatorSeller sellerAlliance = AuctionatorSeller(Auctionator::getInstance());
-        sellerAlliance.LetsGetToIt(
-            config->sellerConfig.auctionsPerRun,
-            (uint32)AuctionHouseId::Alliance
-        );
-    } else {
-        logInfo("Alliance count over max: " + std::to_string(auctionCountAlliance));
+    if (config) {
+        RunSeller("Alliance", (uint32)AuctionHouseId::Alliance, config->allianceSeller);
     }
 }
 
 void AuctionatorEvents::EventHordeSeller()
 {
-    if (!config || !Auctionator::getInstance()->GetAuctionHouse((uint32)AuctionHouseId::Horde)) {
-        logError("Horde auction house is not initialized.");
-        return;
-    }
-
-    if (SkipSharedHouseEvent("Horde seller", (uint32)AuctionHouseId::Horde)) {
-        return;
-    }
-
-    uint32 const auctionCountHorde = Auctionator::getInstance()->CountAuctions((uint32)AuctionHouseId::Horde);
-    if (auctionCountHorde < config->hordeSeller.maxAuctions) {
-        logInfo(
-            "Horde count is good, here we go: "
-            + std::to_string(auctionCountHorde)
-            + " of " + std::to_string(config->hordeSeller.maxAuctions)
-        );
-
-        AuctionatorSeller sellerHorde = AuctionatorSeller(Auctionator::getInstance());
-        sellerHorde.LetsGetToIt(
-            config->sellerConfig.auctionsPerRun,
-            (uint32)AuctionHouseId::Horde
-        );
-    } else {
-        logInfo("Horde count over max: " + std::to_string(auctionCountHorde));
+    if (config) {
+        RunSeller("Horde", (uint32)AuctionHouseId::Horde, config->hordeSeller);
     }
 }
 
 void AuctionatorEvents::EventNeutralSeller()
 {
-    if (!config || !Auctionator::getInstance()->GetAuctionHouse((uint32)AuctionHouseId::Neutral)) {
-        logError("Neutral auction house is not initialized.");
+    if (config) {
+        RunSeller("Neutral", (uint32)AuctionHouseId::Neutral, config->neutralSeller);
+    }
+}
+
+void AuctionatorEvents::PruneMarketData()
+{
+    //
+    // The market table keeps one row per item and scan and nothing else ever removed them, so
+    // a realm on a short scan interval grew it without bound unless a GM remembered
+    // ".auctionator marketprune".
+    //
+    // Never automatic when either setting is 0: RetentionDays = 0 is "keep everything", and
+    // MaxAgeDays = 0 means the readers use a row however old it is, so no row is safe to drop.
+    // Rows the readers would still use (younger than MaxAgeDays) are never pruned either.
+    //
+    if (!config || config->marketDataRetentionDays == 0 || config->marketDataMaxAgeDays == 0) {
         return;
     }
 
-    if (SkipSharedHouseEvent("Neutral seller", (uint32)AuctionHouseId::Neutral)) {
+    // At most once an hour: the prune counts before it deletes, and scan_datetime alone is
+    // not indexed.
+    uint32 const nowMs = getMSTime();
+    if (lastMarketPruneMs != 0 && getMSTimeDiff(lastMarketPruneMs, nowMs) < HOUR * IN_MILLISECONDS) {
         return;
     }
 
-    uint32 const auctionCountNeutral = Auctionator::getInstance()->CountAuctions((uint32)AuctionHouseId::Neutral);
-    if (auctionCountNeutral < config->neutralSeller.maxAuctions) {
-        logInfo(
-            "Neutral count is good, here we go: "
-            + std::to_string(auctionCountNeutral)
-            + " of " + std::to_string(config->neutralSeller.maxAuctions)
-        );
+    lastMarketPruneMs = nowMs;
 
-        AuctionatorSeller sellerNeutral = AuctionatorSeller(Auctionator::getInstance());
-        sellerNeutral.LetsGetToIt(
-            config->sellerConfig.auctionsPerRun,
-            (uint32)AuctionHouseId::Neutral
-        );
-    } else {
-        logInfo("Neutral count over max: " + std::to_string(auctionCountNeutral));
-    }
+    AuctionatorMarketData marketData;
+    marketData.PruneOlderThan(std::max(config->marketDataRetentionDays, config->marketDataMaxAgeDays));
 }
 
 void AuctionatorEvents::EventMarketImport()
@@ -433,6 +413,8 @@ void AuctionatorEvents::EventMarketImport()
         config->marketDataImportMaxRows,
         false
     );
+
+    PruneMarketData();
 }
 
 void AuctionatorEvents::EventMarketScan()
@@ -447,4 +429,6 @@ void AuctionatorEvents::EventMarketScan()
     // auctionator's own listings take part in the sample.
     AuctionatorMarketData marketData;
     marketData.ScanAuctionHouse(config->marketDataScanExcludeSelf != 0 ? config->characterGuid : 0);
+
+    PruneMarketData();
 }

@@ -1,5 +1,6 @@
 #include "AuctionatorBidder.h"
 #include "Auctionator.h"
+#include "AuctionatorMarketData.h"
 #include "AuctionHouseSearcher.h"
 #include "ObjectMgr.h"
 #include "DatabaseEnv.h"
@@ -40,7 +41,7 @@ void AuctionatorBidder::SpendSomeCash()
     // only the module's own listings, which the owner filter excludes. Report that instead
     // of silently doing nothing every cycle.
     //
-    if (auctionHouseId != (uint32)AuctionHouseId::Neutral && Auctionator::UsesSharedNeutralAuctionHouse())
+    if (Auctionator::IsHouseHiddenBySharedAuctionHouse(auctionHouseId))
     {
         logError("bidder skipped for house " + std::to_string(auctionHouseId)
             + ": AllowTwoSide.Interaction.Auction is enabled, so all player auctions live in house 7 (neutral). "
@@ -493,18 +494,32 @@ void AuctionatorBidder::LoadMarketData(std::vector<uint32>& itemEntries)
         inList += std::to_string(itemEntries[i]);
     }
 
-    // Newest scan per entry, selected by sorting descending on the primary key
-    // (entry, scan_datetime) and keeping the first row of each entry. The age comes from
-    // the database's own clock; comparing a stored DATETIME to a C++ epoch would mix time
-    // zones.
+    //
+    // The realm's own auction house scan is left out unless the operator asked for it: those
+    // rows are the asking prices of the players this bidder buys from, and it pays with newly
+    // created gold - trusting them would let a player set the price the bot then pays.
+    //
+    std::string const sourceFilter = config->bidderUseScanPrices != 0
+        ? ""
+        : std::string(" AND source <> '") + AuctionatorMarketScanSource + "'";
+
+    // Newest scan per entry, picked by the database: the table keeps history (one row per
+    // item and scan), so fetching every row of the IN list and keeping the first one here
+    // moved the whole history of up to 1000 items across the wire on every cycle. The age
+    // comes from the database's own clock; comparing a stored DATETIME to a C++ epoch would
+    // mix time zones.
     std::string marketQuery = R"(
-        SELECT entry, average_price, COALESCE(GREATEST(0, TIMESTAMPDIFF(SECOND, scan_datetime, NOW())), 0)
-        FROM mod_auctionator_market_price
-        WHERE entry IN ({})
-        ORDER BY entry, scan_datetime DESC
+        SELECT mp.entry, mp.average_price, COALESCE(GREATEST(0, TIMESTAMPDIFF(SECOND, mp.scan_datetime, NOW())), 0)
+        FROM mod_auctionator_market_price mp
+        INNER JOIN (
+            SELECT entry, MAX(scan_datetime) AS max_scan
+            FROM mod_auctionator_market_price
+            WHERE entry IN ({}){}
+            GROUP BY entry
+        ) newest ON newest.entry = mp.entry AND newest.max_scan = mp.scan_datetime
     )";
 
-    QueryResult result = CharacterDatabase.Query(marketQuery, inList);
+    QueryResult result = CharacterDatabase.Query(marketQuery, inList, sourceFilter);
     if (!result) {
         logDebug("no market data rows for the " + std::to_string(itemEntries.size()) + " candidate item(s)");
         return;
@@ -515,13 +530,11 @@ void AuctionatorBidder::LoadMarketData(std::vector<uint32>& itemEntries)
         Field* fields = result->Fetch();
         uint32 const entry = fields[0].Get<uint32>();
 
-        if (marketData.find(entry) == marketData.end())
-        {
-            MarketScan scan;
-            scan.averagePrice = fields[1].Get<uint32>();
-            scan.ageSeconds = fields[2].Get<uint32>();
-            marketData[entry] = scan;
-        }
+        // One row per entry: (entry, scan_datetime) is the table's primary key.
+        MarketScan scan;
+        scan.averagePrice = fields[1].Get<uint32>();
+        scan.ageSeconds = fields[2].Get<uint32>();
+        marketData[entry] = scan;
     } while (result->NextRow());
 
     logDebug("market data preloaded for " + std::to_string(marketData.size())

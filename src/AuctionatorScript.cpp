@@ -22,6 +22,10 @@ public:
             LOG_INFO("server.loading", "[Auctionator]: Auctionator disabled.");
         }
 
+        // The core has loaded the auction houses and nobody can list yet: the moment to drop
+        // registry rows of auctions that no longer exist (their ids are about to be reused).
+        AuctionatorSales().LoadRegistry();
+
         //
         // The bidder is a gold faucet by design: the module holds no money, so nothing is
         // escrowed for its bids/buyouts while the core pays the seller from newly created
@@ -139,6 +143,16 @@ class AuctionatorHouseScript : public AuctionHouseScript
                     newPrice,
                     auction->GetAuctionOutBid(),
                     auction->item_template);
+        }
+
+        // Fires for every way an auction leaves its house (sold, expired, cancelled, and the
+        // module's own buyout/delist), after the sale hook above has run.
+        void OnAuctionRemove(AuctionHouseObject* /*ah*/, AuctionEntry* entry) override
+        {
+            if (entry)
+            {
+                AuctionatorSales::Forget(entry->Id);
+            }
         }
 
         void OnBeforeAuctionHouseMgrUpdate() override

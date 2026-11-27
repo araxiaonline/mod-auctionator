@@ -33,6 +33,9 @@ class AuctionatorSeller : public AuctionatorBase
     public:
         explicit AuctionatorSeller(Auctionator* natorParam);
         void LetsGetToIt(uint32 maxCount, uint32 houseId);
+        // Drops the shared candidate pool, so the next run rebuilds it. For whoever changes
+        // what the pool is built from: the seller settings, the market prices.
+        static void InvalidatePool();
         static uint32 GetRandomNumber(uint32 min, uint32 max);
 };
 

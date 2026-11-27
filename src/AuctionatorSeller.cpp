@@ -25,14 +25,20 @@ namespace
     // Shared candidate pool. The pool (item_template joined with the module tables) does
     // not depend on the auction house, but each of the three house events constructs its
     // own AuctionatorSeller: without this cache every house on a one minute cycle ran the
-    // same heavy query. The time to live is one tick (the events are driven by the auction
-    // house manager's minute timer).
+    // same heavy query.
+    //
+    // The time to live spans several ticks on purpose. The events are driven by the auction
+    // house manager's minute timer, so a time to live of one minute expired on the very tick
+    // that wanted to reuse it, and the query (a synchronous join over item_template on the
+    // world thread) ran every minute anyway. What the pool is built from changes rarely, and
+    // the places that change it call InvalidatePool(); a manual edit of the config tables is
+    // picked up when the time to live runs out.
     //
     // Only the world thread runs the events and the GM commands, so this needs no locking.
     //
     std::vector<CachedItem> PoolCache;
     uint32 PoolCacheMs = 0;
-    uint32 const PoolCacheTtlMs = 60 * 1000;
+    uint32 const PoolCacheTtlMs = 5 * 60 * 1000;
 
     // Seconds in a day, used for the market data age check.
     constexpr uint64 SecondsPerDay = 24 * 60 * 60;
@@ -135,6 +141,12 @@ AuctionatorSeller::AuctionatorSeller(Auctionator* natorParam)
     nator = natorParam;
 }
 
+void AuctionatorSeller::InvalidatePool()
+{
+    PoolCache.clear();
+    PoolCacheMs = 0;
+}
+
 void AuctionatorSeller::LetsGetToIt(uint32 maxCount, uint32 houseId)
 {
     if (!nator || !nator->config) {
@@ -154,7 +166,7 @@ void AuctionatorSeller::LetsGetToIt(uint32 maxCount, uint32 houseId)
     // as well; stopping here keeps the log to one clear line per cycle instead of one per
     // attempted item, and avoids the (expensive) candidate query altogether.
     //
-    if (houseId != (uint32)AuctionHouseId::Neutral && Auctionator::UsesSharedNeutralAuctionHouse())
+    if (Auctionator::IsHouseHiddenBySharedAuctionHouse(houseId))
     {
         logError("seller skipped for house " + std::to_string(houseId)
             + ": AllowTwoSide.Interaction.Auction is enabled, so only house 7 (neutral) is visible to players. "
@@ -190,6 +202,12 @@ void AuctionatorSeller::LetsGetToIt(uint32 maxCount, uint32 houseId)
     // 0 = no item level limit; read once per pool build (the pool itself is cached).
     uint32 const maxItemLevel = nator->config->sellerConfig.maxItemLevel;
 
+    //
+    // Bonding: bind on pickup (1) is never listed, and an item without any binding (0) always
+    // passes - aicconf.bonding is a minimum for items that do bind. Dropping that second half
+    // took every unbound weapon, armor piece and projectile out of the pool, because their
+    // seed rows carry bonding = 1.
+    //
     std::string cacheQuery = R"(
         SELECT
             it.entry, it.name, it.BuyPrice, it.SellPrice, it.stackable, it.quality
@@ -205,7 +223,7 @@ void AuctionatorSeller::LetsGetToIt(uint32 maxCount, uint32 houseId)
                 aicconf.class = it.class
                 AND aicconf.subclass = it.subclass
                 AND it.bonding != 1
-                AND (aicconf.bonding = 0 OR it.bonding >= aicconf.bonding)
+                AND (it.bonding >= aicconf.bonding OR it.bonding = 0)
         )" + verifiedBuildFilter + R"(
             LEFT JOIN {}.mod_auctionator_disabled_items dis ON it.entry = dis.item
             LEFT JOIN {}.mod_auctionator_quality_config qc ON qc.quality = it.quality
@@ -262,7 +280,7 @@ void AuctionatorSeller::LetsGetToIt(uint32 maxCount, uint32 houseId)
             //
             logWarn("seller item query produced no rows for house " + std::to_string(houseId)
                 + ". Check, in this order: (1) the world DB user has SELECT on the characters schema, because the "
-                  "query joins " + characterDbName + ".mod_auctionator_market_price and " + characterDbName + ".item_instance "
+                  "query joins " + characterDbName + ".mod_auctionator_market_price "
                   "through the world connection (a denied SELECT only shows in the sql log); (2) "
                 + worldDbName + ".mod_auctionator_itemclass_config exists and has rows; (3) "
                   "item_template is populated for the configured class/subclass pairs; (4) "
@@ -292,11 +310,12 @@ void AuctionatorSeller::LetsGetToIt(uint32 maxCount, uint32 houseId)
             item.stackCount = fields[10].Get<uint32>();
 
             // Item level gate: a recipe counts as the item it makes, never as its own
-            // ItemLevel (a placeholder on recipes). A recipe whose crafted item cannot be
-            // resolved is never listed, at any setting of the limit; GM listings are exempt.
+            // ItemLevel (a placeholder on recipes). While a limit is set, a recipe whose
+            // crafted item cannot be resolved is not listed (its level is unknown); without a
+            // limit nothing is gated, so every recipe stays in. GM listings are exempt.
             item.itemLevel = fields[11].Get<uint32>();
 
-            if (fields[12].Get<uint32>() == ITEM_CLASS_RECIPE)
+            if (maxItemLevel > 0 && fields[12].Get<uint32>() == ITEM_CLASS_RECIPE)
             {
                 ItemTemplate const* recipe = sObjectMgr->GetItemTemplate(item.entry);
                 item.itemLevel = recipe ? CraftedItemLevel(recipe) : 0;
@@ -326,7 +345,7 @@ void AuctionatorSeller::LetsGetToIt(uint32 maxCount, uint32 houseId)
                 logWarn("item level gate dropped every one of the " + std::to_string(recipesWithoutProduct + skippedByItemLevel)
                     + " usable row(s) for house " + std::to_string(houseId) + ": "
                     + std::to_string(recipesWithoutProduct) + " recipe(s) whose crafted item cannot be resolved "
-                      "(never listed by the automatic seller) and "
+                      "(not listed while a limit is set) and "
                     + std::to_string(skippedByItemLevel) + " item(s) above Auctionator.Seller.MaxItemLevel = "
                     + std::to_string(maxItemLevel) + ". Raise that limit, or add the class/subclass you want "
                       "listed to mod_auctionator_itemclass_config.");
@@ -486,7 +505,9 @@ void AuctionatorSeller::LetsGetToIt(uint32 maxCount, uint32 houseId)
             unitPrice = defaultPrice;
         }
 
-        if (!useMarketPrice && qualityMultiplier > 0.0f) {
+        // Applied as configured, 0 included (the price then bottoms out at the floor below);
+        // GetQualityMultiplier() never returns a negative value.
+        if (!useMarketPrice) {
             unitPrice = ClampPrice(std::llround(static_cast<double>(unitPrice) * static_cast<double>(qualityMultiplier)));
         }
 

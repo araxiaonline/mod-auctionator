@@ -33,10 +33,10 @@
 Auctionator.Enabled = 1
 
 #    Auctionator.CharacterId
-#        The ACCOUNT id (not a character id) the module's dummy WorldSession is created
-#        with: it is used for the RBAC permission lookup and written back as
-#        account.totaltime / account.online when that session is released on shutdown,
-#        so it has to be the real account that owns CharacterGuid below.
+#        Optional. The ACCOUNT id (not a character id) the module's dummy WorldSession is
+#        created with: it is written back as account.totaltime / account.online when that
+#        session is released on shutdown, so when set it has to be the real account that
+#        owns CharacterGuid below. 0 = no dummy session; the module works without it.
 #
 Auctionator.CharacterId = 2
 
@@ -64,19 +64,20 @@ Auctionator.CharacterGuid = 2
 #   With AllowTwoSide.Interaction.Auction = 1 the counts are still per house (the
 #   three houses share one in-memory object, so the module counts by house id), but
 #   only the neutral house is visible to players - see the shared-house note below.
-# CycleMinutes: how often that house is stocked. Clamped to at least 1.
+# CycleMinutes: how often that house is stocked. Clamped to at least 1. Default: 3 (each
+#   house used to be stocked every third minute, when one seller event rotated over them).
 ########################################
 Auctionator.AllianceSeller.Enabled = 0
 Auctionator.AllianceSeller.MaxAuctions = 5000
-Auctionator.AllianceSeller.CycleMinutes = 1
+Auctionator.AllianceSeller.CycleMinutes = 3
 
 Auctionator.HordeSeller.Enabled = 0
 Auctionator.HordeSeller.MaxAuctions = 5000
-Auctionator.HordeSeller.CycleMinutes = 1
+Auctionator.HordeSeller.CycleMinutes = 3
 
 Auctionator.NeutralSeller.Enabled = 0
 Auctionator.NeutralSeller.MaxAuctions = 5000
-Auctionator.NeutralSeller.CycleMinutes = 1
+Auctionator.NeutralSeller.CycleMinutes = 3
 
 ########################################
 # SHARED FACTION HOUSES (AllowTwoSide.Interaction.Auction = 1)
@@ -231,11 +232,12 @@ Auctionator.Seller.BidOnly = 0
 #     Default: 1
 #
 # Auctionator.Seller.ExcludeUnverifiedItems
-#     1 - skip item_template rows with VerifiedBuild = 1.
-#     0 - no such filter. Default: 0
-#     In most world databases VerifiedBuild = 1 means "not verified by the content
-#     team" rather than "invalid item", and the filter can drop ~30% of the
-#     otherwise eligible items, so it is off unless the data says otherwise.
+#     1 - skip item_template rows with VerifiedBuild = 1. Default: 1
+#     0 - no such filter.
+#     The seller always applied this filter before it became an option, so 1 keeps an
+#     upgraded realm listing what it used to. In most world databases VerifiedBuild = 1
+#     means "not verified by the content team" rather than "invalid item", and the filter
+#     drops ~30% of the otherwise eligible items: set 0 to list those as well.
 #
 # Auctionator.Seller.MaxItemLevel
 #     Highest item level the automatic seller may list; 0 = no limit. Default: 0
@@ -243,12 +245,13 @@ Auctionator.Seller.BidOnly = 0
 #     A recipe (class 9) is judged by what it MAKES, not by its own item_template.ItemLevel,
 #     which is a placeholder on recipes: the module follows the recipe's taught spell
 #     (item_template.spells[1..5] with spelltrigger = 6) into Spell.dbc and compares the level
-#     of the item that spell creates (SPELL_EFFECT_CREATE_ITEM). A recipe whose crafted item
-#     cannot be resolved - enchanting formulas, inert tomes and books - is never listed.
+#     of the item that spell creates (SPELL_EFFECT_CREATE_ITEM). While a limit is set, a
+#     recipe whose crafted item cannot be resolved - enchanting formulas, inert tomes and
+#     books - is not listed (its level is unknown); with 0 nothing is gated.
 #
 #     Automatic seller only; GM listings (".auctionator add", "addlist",
-#     mod_auctionator_gm_list) are unaffected. Re-read once a minute with the candidate pool,
-#     so ".auctionator maxitemlevel <value|off>" applies without a restart.
+#     mod_auctionator_gm_list) are unaffected. ".auctionator maxitemlevel <value|off>"
+#     rebuilds the candidate pool, so it applies without a restart.
 #
 # Auctionator.Seller.MinPriceModifier
 #     Price floor, applied to item_template.SellPrice (the vendor sell price).
@@ -310,9 +313,14 @@ Auctionator.Seller.BidOnly = 0
 #
 # Auctionator.MarketData.RetentionDays
 #     Default retention used by ".auctionator marketprune [days]". Importing keeps
-#     history (one row per item and scan), so old rows should be pruned now and then.
+#     history (one row per item and scan), so old rows have to go at some point.
 #     The auction house scan adds one row per item each run, so on a short interval it
-#     is the main reason to prune. Default: 30
+#     is the main reason to prune.
+#     The timed import and the timed scan also prune by themselves, at most once an
+#     hour: rows older than this many days, but never rows that are still usable
+#     (younger than MarketData.MaxAgeDays). Nothing is pruned automatically when this is
+#     0 or when MaxAgeDays is 0 (no age limit, so every row counts as usable).
+#     Default: 30
 #
 # NOTE on scan_datetime: the stored timestamp is interpreted in the database
 # server's time zone. The age of a scan is computed by the database itself
@@ -333,7 +341,7 @@ Auctionator.MarketData.ScanIntervalMinutes = 0
 Auctionator.MarketData.ScanExcludeSelf = 1
 Auctionator.MarketData.RetentionDays = 30
 Auctionator.Seller.PreferMarketItems = 1
-Auctionator.Seller.ExcludeUnverifiedItems = 0
+Auctionator.Seller.ExcludeUnverifiedItems = 1
 Auctionator.Seller.MaxItemLevel = 0
 Auctionator.Seller.MinPriceModifier = 1.0
 Auctionator.Seller.MaxPriceModifier = 2.0
@@ -375,8 +383,8 @@ Auctionator.Seller.MaxPriceModifier = 2.0
 #     Independent of the class whitelist above: an item must match a class row AND not
 #     sit on a disabled quality.
 #
-# All three tables can be edited live; the seller picks the changes up on its next
-# cycle (no restart needed). Note that mod_auctionator_itemclass_config is a WHITELIST:
+# All three tables can be edited live; the seller picks the changes up within five
+# minutes, when it rebuilds its candidate pool (no restart needed). Note that mod_auctionator_itemclass_config is a WHITELIST:
 # its rows are inner-joined, so a class/subclass without a row is never listed - add the
 # rows to include a type, set max_count = 0 to exclude it.
 ########################################
@@ -388,6 +396,20 @@ Auctionator.Seller.MaxPriceModifier = 2.0
 # Default is 0 to disable bidding on own auctions.
 ########################################
 Auctionator.Bidder.BidOnOwn = 0
+
+########################################
+# Auctionator.Bidder.UseScanPrices
+#     0 - the bidder prices an item from imported market data only (and from the vendor
+#         price when there is none). Default.
+#     1 - it may also use the rows of this realm's own auction house scan
+#         (source 'ah-scan', see Auctionator.MarketData.ScanIntervalMinutes).
+#     Leave this at 0 on a realm with real players. The scan records what players are
+#     ASKING, and the bidder pays with newly created gold: with 1, a player can list a
+#     few stacks of an item far above its value, wait for the scan to make that the
+#     "market" price, and have the bot buy the listings. The seller is unaffected: it
+#     uses scan prices either way.
+########################################
+Auctionator.Bidder.UseScanPrices = 0
 
 ########################################
 # Multipliers for seller

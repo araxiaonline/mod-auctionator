@@ -18,6 +18,10 @@
 // ScanAuctionHouse(), which prices the realm's own auction house, and is read by the
 // seller and the bidder on every cycle.
 //
+// `source` value of the rows ScanAuctionHouse() writes, so they can be told apart from an
+// imported CSV feed. The bidder reads it: it does not price from these rows by default.
+constexpr char const* AuctionatorMarketScanSource = "ah-scan";
+
 class AuctionatorMarketData : public AuctionatorBase
 {
     public:
