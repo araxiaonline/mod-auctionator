@@ -11,6 +11,8 @@
 #include "EventMap.h"
 #include "AuctionatorEvents.h"
 #include "AuctionatorBase.h"
+#include "WorldSession.h"
+#include <memory>
 
 struct AuctionatorItem
 {
@@ -42,7 +44,8 @@ class Auctionator : public AuctionatorBase
         AuctionHouseEntry const* HordeAhEntry;
         AuctionHouseEntry const* AllianceAhEntry;
         AuctionHouseEntry const* NeutralAhEntry;
-        WorldSession *session;
+        // Owned for process lifetime — CreateAuction builds a temporary Player on this session.
+        std::unique_ptr<WorldSession> session;
         AuctionatorEvents events;
 
     public:

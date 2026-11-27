@@ -44,7 +44,7 @@ void Auctionator::CreateAuction(AuctionatorItem newItem)
     // ItemTemplate const* prototype = sObjectMgr->GetItemTemplate(itemId);
 
 
-    Player player(session);
+    Player player(session.get());
     player.Initialize(config->characterGuid);
     ObjectAccessor::AddObject(&player);
     uint32 houseId = newItem.houseId;
@@ -173,11 +173,13 @@ void Auctionator::Initialize()
     NeutralAh = sAuctionMgr->GetAuctionsMapByHouseId(AuctionHouseId::Neutral);
     NeutralAhEntry = sAuctionHouseStore.LookupEntry((uint32)AuctionHouseId::Neutral);
 
-    WorldSession _session(
+    // Must outlive Initialize(): CreateAuction() constructs a temporary Player on this session.
+    // accountFlags (3rd arg) is required by current AzerothCore / playerbots WorldSession ctor.
+    session = std::make_unique<WorldSession>(
         config->characterId,
         std::move(accountName),
-        0,
-        nullptr,
+        0,              // accountFlags
+        nullptr,        // WorldSocket
         SEC_GAMEMASTER,
         sWorld->getIntConfig(CONFIG_EXPANSION),
         0,
@@ -187,8 +189,6 @@ void Auctionator::Initialize()
         false,
         0
     );
-
-    session = &_session;
 }
 
 void Auctionator::InitializeConfig(ConfigMgr* configMgr)
