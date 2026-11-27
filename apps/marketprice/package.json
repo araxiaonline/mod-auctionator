@@ -4,11 +4,12 @@
   "description": "Market price utilities for mod-auctionator",
   "main": "index.js",
   "scripts": {
-    "test": "npm test"
+    "test": "node --check index.js"
   },
   "author": "James Huston",
   "license": "MIT",
   "dependencies": {
-    "csv": "^6.3.5"
+    "csv": "^6.3.5",
+    "csv-parse": "^5.5.2"
   }
 }
