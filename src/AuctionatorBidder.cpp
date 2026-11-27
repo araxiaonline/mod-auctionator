@@ -176,7 +176,7 @@ bool AuctionatorBidder::BidOnAuction(AuctionEntry* auction, ItemTemplate const* 
                 auctionhouse
             SET
                 buyguid = {},
-                lastbid = {}.
+                lastbid = {}
             WHERE
                 id = {}
         )",
