@@ -346,11 +346,12 @@ void AuctionatorSeller::LetsGetToIt(uint32 maxCount, uint32 houseId)
     std::vector<CachedItem> const& cachedItems = PoolCache;
 
     // Count live listings from the in-memory AH (listing rows, not stack sizes) —
-    // avoids a per-tick characters DB query (#31).
+    // avoids a per-tick characters DB query (#31). Filter by houseId because shared
+    // faction AH returns one object for all houses.
     std::unordered_map<uint32, uint32> currentCounts;
-    if (ahMgr)
+    if (AuctionHouseObject* house = nator->GetAuctionHouse(houseId))
     {
-        for (auto iter = ahMgr->GetAuctionsBegin(); iter != ahMgr->GetAuctionsEnd(); ++iter)
+        for (auto iter = house->GetAuctionsBegin(); iter != house->GetAuctionsEnd(); ++iter)
         {
             AuctionEntry* auction = iter->second;
             if (auction && (uint32)auction->houseId == houseId)
