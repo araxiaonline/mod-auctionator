@@ -28,7 +28,6 @@ jobs:
         permissions:
             # The release step pushes a tag and creates a release.
             contents: write
-            pull-requests: read
         steps:
             - name: checkout core
               uses: actions/checkout@v4
@@ -89,10 +88,27 @@ jobs:
                 cmake --build build --target worldserver -j "$(($(nproc) + 1))"
                 ccache --show-stats
 
+            # Minor bump of the latest release, with generated notes.
+            #
+            # Done here rather than with rymndhng/release-on-push-action, which requires the
+            # latest tag to be major.minor.patch: this repo's releases were tagged by hand as
+            # two-part versions (v0.9), and the action dies on the missing patch number.
+            # A two-part tag is read as patch 0, and new tags are always three-part.
             - name: tag release
               if: github.event_name == 'push'
-              uses: rymndhng/release-on-push-action@master
-              with:
-                bump_version_scheme: minor
               env:
-                GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                GH_REPO: ${{ github.repository }}
+              run: |
+                # Empty only when the repo has no release at all; a failed lookup fails the step
+                # instead of restarting the numbering.
+                latest="$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // ""')"
+                version="${latest#v}"
+                IFS=. read -r major minor patch <<< "${version:-0.0.0}"
+                if ! [[ "$major" =~ ^[0-9]+$ && "${minor:-0}" =~ ^[0-9]+$ ]]; then
+                  echo "latest release tag '$latest' is not a version this step can bump"
+                  exit 1
+                fi
+                next="v${major}.$(( ${minor:-0} + 1 )).0"
+                echo "latest release: ${latest:-none} -> $next"
+                gh release create "$next" --target "$GITHUB_SHA" --title "$next" --generate-notes
