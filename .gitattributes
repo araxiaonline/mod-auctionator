@@ -1,0 +1,18 @@
+# Line endings and whitespace, matching the AzerothCore core repository.
+#
+# The CI runs on Linux: every text file must be committed with LF (a CRLF shell
+# script fails with "bad interpreter", and CRLF sources show up as fully rewritten
+# files in diffs). Contributors on Windows should leave core.autocrlf alone and let
+# this file do the normalisation.
+* text eol=lf
+
+# Whitespace rules
+# strict (no trailing whitespace, no tabs)
+*.cpp    whitespace=trailing-space,space-before-tab,tab-in-indent,cr-at-eol
+*.h      whitespace=trailing-space,space-before-tab,tab-in-indent,cr-at-eol
+
+# normal (no trailing whitespace)
+*.sql    whitespace=trailing-space,space-before-tab,cr-at-eol
+*.conf.dist whitespace=trailing-space,space-before-tab,cr-at-eol
+*.md     whitespace=trailing-space,space-before-tab,cr-at-eol
+*.js     whitespace=trailing-space,space-before-tab,cr-at-eol

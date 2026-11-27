@@ -1,0 +1,19 @@
+# Code style gate, using the script that ships with this module (it is derived
+# from the AzerothCore codestyle checks: tabs, trailing whitespace, multiple
+# blank lines and ObjectGuid::GetCounter() inside log statements).
+name: codestyle
+
+on:
+  push:
+    branches:
+      - 'main'
+      - 'master'
+  pull_request:
+
+jobs:
+  codestyle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check code style
+        run: bash apps/ci/ci-codestyle.sh

@@ -1,6 +1,18 @@
 # Prerequisites
 *.d
 
+# Local helper SQL with the real schema names substituted
+useful_queries.local.sql
+
+# Local module configuration: the server reads configs/modules/mod_auctionator.conf,
+# which is copied from conf/mod_auctionator.conf.dist. A copy sitting next to the
+# .dist is a working file, not something to publish.
+conf/mod_auctionator.conf
+
+# Visual Studio working files (IntelliSense/optimisation caches)
+.vs/
+CppProperties.json
+
 # Compiled Object files
 *.slo
 *.lo
