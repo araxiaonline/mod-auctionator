@@ -1,3 +1,10 @@
+# Builds this module against the core Araxia runs, and tags a release when a push to
+# main builds.
+#
+# The core is araxiaonline/azerothcore-wotlk-mod-playerbots, checked out fresh at the
+# branch below on every run. It used to come from a prebuilt container image
+# (ac-wotlk-worldserver-devcontainer) whose core was never refreshed: once the module
+# needed something newer than that snapshot, this check failed on every run.
 name: Build And Release
 on:
     push:
@@ -6,19 +13,86 @@ on:
     pull_request:
         branches:
             - 'main'
+
+env:
+    CORE_REPOSITORY: araxiaonline/azerothcore-wotlk-mod-playerbots
+    CORE_REF: Playerbot
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
     build-release:
-        runs-on: ubuntu-latest
-        container:
-            image: ghcr.io/araxiaonline/ac-wotlk-worldserver-devcontainer:latest
-            options: --user root
-        env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        runs-on: ubuntu-24.04
+        permissions:
+            # The release step pushes a tag and creates a release.
+            contents: write
+            pull-requests: read
         steps:
-            - name: build
-              uses: araxiaonline/share-gh-workflows/.github/actions/build-tag-release@main
+            - name: checkout core
+              uses: actions/checkout@v4
               with:
-                GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                tag_release: true
-                event_name: ${{ github.event_name }}
+                repository: ${{ env.CORE_REPOSITORY }}
+                ref: ${{ env.CORE_REF }}
 
+            - name: checkout module
+              uses: actions/checkout@v4
+              with:
+                path: modules/${{ github.event.repository.name }}
+
+            - name: get core revision
+              id: core
+              run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+            - name: install requirements
+              run: |
+                sudo apt-get update
+                sudo apt-get install -y git cmake make clang ccache \
+                  libmysqlclient-dev libssl-dev libbz2-dev \
+                  libreadline-dev libncurses-dev libboost-all-dev
+
+            # Nearly all of the build is the core, which only changes when its branch
+            # moves: with a warm cache a run recompiles little more than the module.
+            - name: restore ccache
+              uses: actions/cache@v4
+              with:
+                path: ${{ github.workspace }}/.ccache
+                key: ccache-${{ runner.os }}-${{ steps.core.outputs.sha }}-${{ github.sha }}
+                restore-keys: |
+                  ccache-${{ runner.os }}-${{ steps.core.outputs.sha }}-
+                  ccache-${{ runner.os }}-
+
+            - name: configure
+              env:
+                CCACHE_DIR: ${{ github.workspace }}/.ccache
+              run: |
+                ccache --zero-stats
+                cmake -B build -S . \
+                  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+                  -DCMAKE_C_COMPILER=clang \
+                  -DCMAKE_CXX_COMPILER=clang++ \
+                  -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+                  -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+                  -DAPPS_BUILD=world-only \
+                  -DTOOLS_BUILD=none \
+                  -DSCRIPTS=static \
+                  -DMODULES=static \
+                  -DWITH_WARNINGS=ON
+
+            # The worldserver, not just the module library: modules are static, so a
+            # symbol the module uses but the core does not provide only fails at link.
+            - name: build
+              env:
+                CCACHE_DIR: ${{ github.workspace }}/.ccache
+              run: |
+                cmake --build build --target worldserver -j "$(($(nproc) + 1))"
+                ccache --show-stats
+
+            - name: tag release
+              if: github.event_name == 'push'
+              uses: rymndhng/release-on-push-action@master
+              with:
+                bump_version_scheme: minor
+              env:
+                GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
